@@ -492,8 +492,8 @@ private fun AudioPlayer(
     val context = LocalContext.current
     var player by remember { mutableStateOf<MediaPlayer?>(null) }
     var progress by remember { mutableFloatStateOf(0f) }
-    var currentPos by remember { mutableStateOf("0:00") }
-    var totalDur by remember { mutableStateOf("0:00") }
+    var durationMs by remember { mutableIntStateOf(0) }
+    var isSeeking by remember { mutableStateOf(false) }
 
     DisposableEffect(uri) {
         onDispose {
@@ -505,16 +505,17 @@ private fun AudioPlayer(
 
     LaunchedEffect(isPlaying) {
         while (isPlaying) {
-            player?.let { mp ->
-                if (mp.isPlaying) {
-                    val pos = mp.currentPosition
-                    val dur = mp.duration.coerceAtLeast(1)
-                    progress = pos.toFloat() / dur
-                    currentPos = formatDuration(pos.toLong())
-                    onPositionUpdate(pos)
+            if (!isSeeking) {
+                player?.let { mp ->
+                    if (mp.isPlaying) {
+                        val pos = mp.currentPosition
+                        durationMs = mp.duration.coerceAtLeast(1)
+                        progress = pos.toFloat() / durationMs
+                        onPositionUpdate(pos)
+                    }
                 }
             }
-            delay(50) // fast update for smooth highlighting
+            delay(50)
         }
     }
 
@@ -529,6 +530,7 @@ private fun AudioPlayer(
                     player?.release()
                     player = null
                     progress = 0f
+                    durationMs = 0
                     onPositionUpdate(0)
                     onPlayingChanged(false)
                 } else {
@@ -536,9 +538,9 @@ private fun AudioPlayer(
                     player = MediaPlayer().apply {
                         setDataSource(context, Uri.parse(uri))
                         prepare()
-                        totalDur = formatDuration(duration.toLong())
+                        durationMs = duration
                         setOnCompletionListener {
-                            progress = 0f
+                            progress = 1f
                             onPositionUpdate(0)
                             onPlayingChanged(false)
                         }
@@ -557,25 +559,41 @@ private fun AudioPlayer(
             )
         }
 
-        Spacer(Modifier.width(12.dp))
+        Spacer(Modifier.width(8.dp))
 
         Column(modifier = Modifier.weight(1f)) {
-            LinearProgressIndicator(
-                progress = { progress },
+            androidx.compose.material3.Slider(
+                value = progress,
+                onValueChange = { value ->
+                    isSeeking = true
+                    progress = value
+                },
+                onValueChangeFinished = {
+                    player?.let { mp ->
+                        val seekTo = (progress * mp.duration).toInt()
+                        mp.seekTo(seekTo)
+                        onPositionUpdate(seekTo)
+                    }
+                    isSeeking = false
+                },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(3.dp)
-                    .clip(RoundedCornerShape(2.dp)),
-                color = Color.White,
-                trackColor = Color(0xFF333333),
+                    .height(24.dp),
+                colors = androidx.compose.material3.SliderDefaults.colors(
+                    thumbColor = Color.White,
+                    activeTrackColor = Color.White,
+                    inactiveTrackColor = Color(0xFF333333)
+                )
             )
-            Spacer(Modifier.height(4.dp))
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 4.dp),
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Text(currentPos, style = MaterialTheme.typography.bodySmall, color = Color(0xFF666666))
-                Text(totalDur, style = MaterialTheme.typography.bodySmall, color = Color(0xFF666666))
+                val currentMs = (progress * durationMs).toLong()
+                Text(formatDuration(currentMs), style = MaterialTheme.typography.bodySmall, color = Color(0xFF666666))
+                Text(formatDuration(durationMs.toLong()), style = MaterialTheme.typography.bodySmall, color = Color(0xFF666666))
             }
         }
     }

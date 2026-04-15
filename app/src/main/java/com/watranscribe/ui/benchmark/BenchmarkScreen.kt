@@ -77,25 +77,45 @@ fun BenchmarkScreen(
         )
 
         Column(modifier = Modifier.padding(horizontal = 16.dp)) {
-            // Audio picker
-            Column(
+            // Audio picker row
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(10.dp))
                     .background(Color(0xFF0D0D0D))
-                    .clickable { showAudioPicker = !showAudioPicker }
-                    .padding(14.dp)
+                    .padding(4.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("Test audio", style = MaterialTheme.typography.bodySmall, color = Color(0xFF666666))
-                Spacer(Modifier.height(2.dp))
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable { showAudioPicker = !showAudioPicker }
+                        .padding(10.dp)
+                ) {
+                    Text("Test audio", style = MaterialTheme.typography.bodySmall, color = Color(0xFF666666))
+                    Text(
+                        selectedAudio?.label ?: "No audio available",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = Color.White,
+                        maxLines = 1
+                    )
+                }
+                // Run button inline
                 Text(
-                    selectedAudio?.label ?: "No audio available",
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = Color.White
+                    text = if (isRunning) (currentModel ?: "...") else "Run",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = if (isRunning) Color(0xFF666666) else Color.Black,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (isRunning) Color(0xFF1A1A1A) else Color.White)
+                        .clickable(enabled = !isRunning) { viewModel.runBenchmark() }
+                        .padding(horizontal = 16.dp, vertical = 10.dp)
                 )
             }
 
             if (showAudioPicker) {
+                Spacer(Modifier.height(2.dp))
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -121,34 +141,8 @@ fun BenchmarkScreen(
                 }
             }
 
-            Spacer(Modifier.height(12.dp))
-
-            // Run button
-            Button(
-                onClick = { viewModel.runBenchmark() },
-                enabled = !isRunning,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(48.dp),
-                shape = RoundedCornerShape(10.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = Color.White,
-                    contentColor = Color.Black,
-                    disabledContainerColor = Color(0xFF333333),
-                    disabledContentColor = Color(0xFF999999)
-                )
-            ) {
-                if (isRunning) {
-                    CircularProgressIndicator(modifier = Modifier.size(18.dp), color = Color(0xFF999999), strokeWidth = 2.dp)
-                    Spacer(Modifier.width(8.dp))
-                    Text(currentModel ?: "Running...", fontWeight = FontWeight.SemiBold)
-                } else {
-                    Text("Run Benchmark", fontWeight = FontWeight.SemiBold)
-                }
-            }
-
-            if (progress.isNotBlank() && progress != "Done") {
-                Spacer(Modifier.height(8.dp))
+            if (isRunning && progress.isNotBlank()) {
+                Spacer(Modifier.height(6.dp))
                 Text(progress, style = MaterialTheme.typography.bodySmall, color = Color(0xFF666666))
             }
 
@@ -162,10 +156,10 @@ fun BenchmarkScreen(
                     contentAlignment = Alignment.Center
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("Test all downloaded models", style = MaterialTheme.typography.titleMedium, color = Color(0xFF666666))
+                        Text("Compare all downloaded models", style = MaterialTheme.typography.titleMedium, color = Color(0xFF666666))
                         Spacer(Modifier.height(8.dp))
                         Text(
-                            "Uses a recent voice note to benchmark\neach model's speed and accuracy.",
+                            "Pick a voice note above, then tap Run.\nEach model transcribes the same audio.",
                             style = MaterialTheme.typography.bodySmall,
                             color = Color(0xFF444444),
                             lineHeight = 18.sp
