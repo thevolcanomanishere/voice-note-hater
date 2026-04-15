@@ -1,0 +1,19 @@
+*.iml
+.gradle
+/local.properties
+/.idea
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+/app/build
+/app/schemas
+*.hprof
+
+# Native build artifacts (we commit prebuilt .so files in jniLibs)
+/app/.cxx
+
+# Gradle wrapper jar is committed
+!gradle/wrapper/gradle-wrapper.jar
