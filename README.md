@@ -15,9 +15,11 @@ An Android app that transcribes WhatsApp voice notes locally on your device. No 
 
 ## Screenshots
 
-| Transcriptions | Benchmark | Settings |
-|---|---|---|
-| Dark list view with search, grouped by week. Tap to transcribe, long-press to copy. | Compare speed and accuracy across all downloaded models. | Download and switch between whisper models. |
+<p align="center">
+  <img src="screenshots/transcriptions.png" width="250" />
+  <img src="screenshots/settings.png" width="250" />
+  <img src="screenshots/benchmark.png" width="250" />
+</p>
 
 ## Features
 
