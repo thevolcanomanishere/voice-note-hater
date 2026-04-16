@@ -65,6 +65,9 @@ android {
 }
 
 dependencies {
+    // Official Moonshine Android SDK (Transcriber, streaming API, word-level timings)
+    implementation("ai.moonshine:moonshine-voice:0.0.56")
+
     // Compose BOM
     val composeBom = platform("androidx.compose:compose-bom:2024.12.01")
     implementation(composeBom)

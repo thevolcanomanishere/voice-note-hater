@@ -9,13 +9,14 @@ import com.watranscribe.data.local.TranscriptionStatus
 import com.watranscribe.engine.BenchmarkResult
 import com.watranscribe.engine.Benchmarker
 import com.watranscribe.engine.ModelManager
-import com.watranscribe.engine.WhisperEngine
+import com.watranscribe.engine.TranscriptionEngine
 import com.watranscribe.data.repository.PreferencesRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -32,7 +33,7 @@ data class AudioChoice(
 class BenchmarkViewModel @Inject constructor(
     private val benchmarker: Benchmarker,
     private val modelManager: ModelManager,
-    private val whisperEngine: WhisperEngine,
+    private val engines: Map<String, @JvmSuppressWildcards TranscriptionEngine>,
     private val prefsRepo: PreferencesRepository,
     private val dao: TranscriptionDao
 ) : ViewModel() {
@@ -55,8 +56,42 @@ class BenchmarkViewModel @Inject constructor(
     private val _selectedAudio = MutableStateFlow<AudioChoice?>(null)
     val selectedAudio: StateFlow<AudioChoice?> = _selectedAudio.asStateFlow()
 
+    private val _downloadedModels = MutableStateFlow<List<com.watranscribe.engine.ModelInfo>>(emptyList())
+    val downloadedModels: StateFlow<List<com.watranscribe.engine.ModelInfo>> = _downloadedModels.asStateFlow()
+
+    /** Set of model IDs the user has chosen to include in the next run. */
+    private val _selectedModelIds = MutableStateFlow<Set<String>>(emptySet())
+    val selectedModelIds: StateFlow<Set<String>> = _selectedModelIds.asStateFlow()
+
     init {
         viewModelScope.launch { loadAudioChoices() }
+        refreshDownloadedModels()
+    }
+
+    private fun refreshDownloadedModels() {
+        val downloaded = modelManager.getDownloadedModels()
+        _downloadedModels.value = downloaded
+        // Default: all downloaded models selected.
+        if (_selectedModelIds.value.isEmpty()) {
+            _selectedModelIds.value = downloaded.map { it.id }.toSet()
+        } else {
+            // Drop ids that are no longer downloaded.
+            _selectedModelIds.value = _selectedModelIds.value intersect downloaded.map { it.id }.toSet()
+        }
+    }
+
+    fun toggleModel(id: String) {
+        _selectedModelIds.update { current ->
+            if (id in current) current - id else current + id
+        }
+    }
+
+    fun selectAllModels() {
+        _selectedModelIds.value = _downloadedModels.value.map { it.id }.toSet()
+    }
+
+    fun clearModelSelection() {
+        _selectedModelIds.value = emptySet()
     }
 
     private suspend fun loadAudioChoices() {
@@ -86,9 +121,10 @@ class BenchmarkViewModel @Inject constructor(
             _results.value = emptyList()
 
             val audioUri = Uri.parse(audio.uri)
-            val downloaded = modelManager.getDownloadedModels()
+            val picked = _selectedModelIds.value
+            val downloaded = modelManager.getDownloadedModels().filter { it.id in picked }
             if (downloaded.isEmpty()) {
-                _progress.value = "No models downloaded."
+                _progress.value = "Pick at least one model to benchmark."
                 _isRunning.value = false
                 return@launch
             }
@@ -110,11 +146,11 @@ class BenchmarkViewModel @Inject constructor(
             // Reload the user's preferred model
             _progress.value = "Restoring active model..."
             val selectedId = prefsRepo.modelSize.first()
-            val activeFilename = ModelManager.AVAILABLE_MODELS
-                .find { it.id == selectedId }?.filename ?: "ggml-base.en.bin"
+            val activeModel = ModelManager.AVAILABLE_MODELS.find { it.id == selectedId }
+                ?: ModelManager.AVAILABLE_MODELS.first { it.id == "base.en" }
             try {
-                whisperEngine.release()
-                whisperEngine.loadModel(activeFilename)
+                for (e in engines.values) e.release()
+                engines[activeModel.engine]?.loadModel(activeModel.filename)
             } catch (_: Exception) {}
 
             _currentModel.value = null

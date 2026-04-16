@@ -15,5 +15,18 @@ local.properties
 # Native build artifacts (we commit prebuilt .so files in jniLibs)
 /app/.cxx
 
+# Build outputs that might leak into the tree
+*.apk
+*.aab
+/app/release
+
+# Kotlin compiler incremental cache
+.kotlin
+
+# Local tooling / ad-hoc notes
+.vscode
+.claude
+*.log
+
 # Gradle wrapper jar is committed
 !gradle/wrapper/gradle-wrapper.jar

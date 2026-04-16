@@ -59,7 +59,10 @@ fun BenchmarkScreen(
     val progress by viewModel.progress.collectAsState()
     val audioChoices by viewModel.audioChoices.collectAsState()
     val selectedAudio by viewModel.selectedAudio.collectAsState()
+    val downloadedModels by viewModel.downloadedModels.collectAsState()
+    val selectedModelIds by viewModel.selectedModelIds.collectAsState()
     var showAudioPicker by remember { mutableStateOf(false) }
+    var showModelPicker by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -101,15 +104,20 @@ fun BenchmarkScreen(
                     )
                 }
                 // Run button inline
+                val canRun = !isRunning && selectedModelIds.isNotEmpty() && selectedAudio != null
                 Text(
-                    text = if (isRunning) (currentModel ?: "...") else "Run",
+                    text = when {
+                        isRunning -> currentModel ?: "..."
+                        selectedModelIds.isEmpty() -> "Pick models"
+                        else -> "Run"
+                    },
                     style = MaterialTheme.typography.labelLarge,
-                    color = if (isRunning) Color(0xFF666666) else Color.Black,
+                    color = if (canRun) Color.Black else Color(0xFF666666),
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier
                         .clip(RoundedCornerShape(8.dp))
-                        .background(if (isRunning) Color(0xFF1A1A1A) else Color.White)
-                        .clickable(enabled = !isRunning) { viewModel.runBenchmark() }
+                        .background(if (canRun) Color.White else Color(0xFF1A1A1A))
+                        .clickable(enabled = canRun) { viewModel.runBenchmark() }
                         .padding(horizontal = 16.dp, vertical = 10.dp)
                 )
             }
@@ -137,6 +145,108 @@ fun BenchmarkScreen(
                                 }
                                 .padding(horizontal = 12.dp, vertical = 10.dp)
                         )
+                    }
+                }
+            }
+
+            // Model picker summary row
+            Spacer(Modifier.height(6.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Color(0xFF0D0D0D))
+                    .clickable { showModelPicker = !showModelPicker }
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text("Models", style = MaterialTheme.typography.bodySmall, color = Color(0xFF666666))
+                    val summary = when {
+                        downloadedModels.isEmpty() -> "No models downloaded"
+                        selectedModelIds.isEmpty() -> "None selected"
+                        selectedModelIds.size == downloadedModels.size -> "All ${downloadedModels.size} models"
+                        else -> "${selectedModelIds.size} of ${downloadedModels.size} models"
+                    }
+                    Text(summary, style = MaterialTheme.typography.bodyMedium, color = Color.White)
+                }
+                Text(
+                    if (showModelPicker) "Hide" else "Pick",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = Color(0xFF999999)
+                )
+            }
+
+            if (showModelPicker) {
+                Spacer(Modifier.height(2.dp))
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Color(0xFF111111))
+                        .padding(4.dp)
+                ) {
+                    // All/None toggles
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        Text(
+                            "All",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = Color(0xFF999999),
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .clickable { viewModel.selectAllModels() }
+                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                        )
+                        Text(
+                            "None",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = Color(0xFF999999),
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .clickable { viewModel.clearModelSelection() }
+                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                        )
+                    }
+                    downloadedModels.forEach { model ->
+                        val isChecked = model.id in selectedModelIds
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { viewModel.toggleModel(model.id) }
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(16.dp)
+                                    .clip(RoundedCornerShape(3.dp))
+                                    .background(if (isChecked) Color.White else Color(0xFF333333))
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            Text(
+                                text = model.displayName,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = if (isChecked) Color.White else Color(0xFF888888),
+                                modifier = Modifier.weight(1f)
+                            )
+                            Text(
+                                text = model.engine,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (model.engine == "moonshine") Color(0xFF7C5BF2) else Color(0xFF3B82A8)
+                            )
+                            Spacer(Modifier.width(10.dp))
+                            Text(
+                                text = "${model.sizeMb}MB",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color(0xFF555555)
+                            )
+                        }
                     }
                 }
             }
@@ -224,7 +334,11 @@ private fun ResultCard(result: BenchmarkResult, rank: Int, isFastest: Boolean) {
                     modifier = Modifier.width(28.dp)
                 )
                 Column {
-                    Text(result.modelName, style = MaterialTheme.typography.titleMedium, color = Color.White)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(result.modelName, style = MaterialTheme.typography.titleMedium, color = Color.White)
+                        Spacer(Modifier.width(6.dp))
+                        EngineBadge(result.engineId)
+                    }
                     Text("${result.modelSizeMb}MB", style = MaterialTheme.typography.bodySmall, color = Color(0xFF555555))
                 }
             }
@@ -285,6 +399,24 @@ private fun ResultCard(result: BenchmarkResult, rank: Int, isFastest: Boolean) {
             )
         }
     }
+}
+
+@Composable
+private fun EngineBadge(engineId: String) {
+    val (label, color) = when (engineId) {
+        "moonshine" -> "moonshine" to Color(0xFF7C5BF2)
+        "whisper" -> "whisper" to Color(0xFF3B82A8)
+        else -> engineId to Color(0xFF555555)
+    }
+    Text(
+        text = label,
+        style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, fontWeight = FontWeight.SemiBold),
+        color = Color.White,
+        modifier = Modifier
+            .clip(RoundedCornerShape(4.dp))
+            .background(color)
+            .padding(horizontal = 6.dp, vertical = 2.dp)
+    )
 }
 
 @Composable

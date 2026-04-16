@@ -19,7 +19,9 @@ private const val TAG = "WhisperEngine"
 @Singleton
 class WhisperEngine @Inject constructor(
     @ApplicationContext private val context: Context
-) {
+) : TranscriptionEngine {
+    override val id: String = "whisper"
+
     private var contextPtr: Long = 0L
     private val mutex = Mutex()
     private var currentModel: String? = null
@@ -27,9 +29,10 @@ class WhisperEngine @Inject constructor(
     val preferredThreadCount: Int
         get() = maxOf(1, Runtime.getRuntime().availableProcessors() - 2)
 
-    suspend fun loadModel(modelName: String = "ggml-base.en.bin") = withContext(Dispatchers.IO) {
+    override suspend fun loadModel(modelFilename: String): Unit = withContext(Dispatchers.IO) {
+        val modelName = modelFilename
         mutex.withLock {
-            if (contextPtr != 0L && currentModel == modelName) return@withContext
+            if (contextPtr != 0L && currentModel == modelName) return@withLock
             if (contextPtr != 0L) {
                 WhisperJni.freeContext(contextPtr)
                 contextPtr = 0L
@@ -49,7 +52,7 @@ class WhisperEngine @Inject constructor(
         }
     }
 
-    fun getCurrentModelName(): String? = currentModel
+    override fun getCurrentModelName(): String? = currentModel
 
     /**
      * Transcribe audio samples, streaming segments via the returned Flow.
@@ -71,18 +74,20 @@ class WhisperEngine @Inject constructor(
             }
         }
 
-    data class TranscribeResult(val text: String, val segments: List<TimedSegment>)
-
     /** Transcribe and return text + timed segments. */
-    suspend fun transcribeWithTimings(samples: FloatArray, segmentFlow: MutableSharedFlow<String>?): TranscribeResult =
+    override suspend fun transcribeWithTimings(samples: FloatArray, segmentFlow: MutableSharedFlow<String>?): TranscribeResult =
         withContext(Dispatchers.Default) {
             mutex.withLock {
                 check(contextPtr != 0L) { "Whisper model not loaded. Call loadModel() first." }
 
-                val callback = segmentFlow?.let {
+                // Emit the full running transcript after each segment (callers expect
+                // the latest-state contract, not per-segment deltas).
+                val callback = segmentFlow?.let { flow ->
+                    val buf = StringBuilder()
                     object : WhisperJni.SegmentCallback {
                         override fun onSegment(text: String) {
-                            it.tryEmit(text)
+                            buf.append(text)
+                            flow.tryEmit(buf.toString())
                         }
                     }
                 }
@@ -115,15 +120,18 @@ class WhisperEngine @Inject constructor(
         }
     }
 
-    fun release() {
-        if (contextPtr != 0L) {
-            WhisperJni.freeContext(contextPtr)
-            contextPtr = 0L
-            currentModel = null
+    override suspend fun release() {
+        mutex.withLock {
+            if (contextPtr != 0L) {
+                Log.d(TAG, "Releasing whisper context for $currentModel")
+                WhisperJni.freeContext(contextPtr)
+                contextPtr = 0L
+                currentModel = null
+            }
         }
     }
 
-    fun isLoaded(): Boolean = contextPtr != 0L
+    override fun isLoaded(): Boolean = contextPtr != 0L
 
     companion object {
         val MODELS = mapOf(

@@ -9,9 +9,10 @@ import com.watranscribe.data.local.TranscriptionDao
 import com.watranscribe.data.local.TranscriptionEntity
 import com.watranscribe.data.local.TranscriptionStatus
 import com.watranscribe.engine.AudioDecoder
+import com.watranscribe.engine.ModelInfo
 import com.watranscribe.engine.ModelManager
 import com.watranscribe.engine.PendingContactMatch
-import com.watranscribe.engine.WhisperEngine
+import com.watranscribe.engine.TranscriptionEngine
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -27,7 +28,7 @@ private const val TAG = "TranscriptionRepo"
 @Singleton
 class TranscriptionRepository @Inject constructor(
     private val dao: TranscriptionDao,
-    private val whisperEngine: WhisperEngine,
+    private val engines: Map<String, @JvmSuppressWildcards TranscriptionEngine>,
     private val audioDecoder: AudioDecoder,
     private val prefsRepo: PreferencesRepository,
     @ApplicationContext private val context: Context
@@ -176,23 +177,29 @@ class TranscriptionRepository @Inject constructor(
 
     /**
      * Transcribe with streaming: emits partial text via [onSegment] as each segment completes.
+     *
+     * @param modelOverride if non-null, use this model instead of the user's pref (for retranscription).
      */
     suspend fun transcribe(
         entity: TranscriptionEntity,
+        modelOverride: ModelInfo? = null,
         onSegment: ((String) -> Unit)? = null
     ): Result<String> = runCatching {
         val totalStart = System.nanoTime()
         dao.updateStatus(entity.id, TranscriptionStatus.IN_PROGRESS)
 
-        // Load the user's selected model
+        // Load the user's selected model (or the override)
         val modelStart = System.nanoTime()
-        val selectedId = prefsRepo.modelSize.first()
-        val modelFilename = ModelManager.AVAILABLE_MODELS
-            .find { it.id == selectedId }?.filename
-            ?: "ggml-base.en.bin"
-        whisperEngine.loadModel(modelFilename)
+        val selectedModel = modelOverride ?: run {
+            val selectedId = prefsRepo.modelSize.first()
+            ModelManager.AVAILABLE_MODELS.find { it.id == selectedId }
+                ?: ModelManager.AVAILABLE_MODELS.first { it.id == "base.en" }
+        }
+        val engine = engines[selectedModel.engine]
+            ?: error("No engine registered for '${selectedModel.engine}' (model ${selectedModel.id})")
+        engine.loadModel(selectedModel.filename)
         val modelMs = (System.nanoTime() - modelStart) / 1_000_000
-        Log.d(TAG, "PERF model_load=${modelMs}ms (${whisperEngine.getCurrentModelName()})")
+        Log.d(TAG, "PERF model_load=${modelMs}ms (${engine.getCurrentModelName()} on ${selectedModel.engine})")
 
         // Decode audio
         val decodeStart = System.nanoTime()
@@ -215,30 +222,32 @@ class TranscriptionRepository @Inject constructor(
         val result = kotlinx.coroutines.coroutineScope {
             val collectJob = if (flow != null && onSegment != null) {
                 launch(Dispatchers.Main) {
-                    var accumulator = ""
-                    flow.collect { segment ->
-                        accumulator += segment
-                        onSegment(accumulator)
-                        dao.updateTranscription(entity.id, accumulator.trim(), TranscriptionStatus.IN_PROGRESS)
+                    // Engines emit the full running transcript each time (Moonshine
+                    // streams partial-then-completed, whisper accumulates inside the
+                    // WhisperEngine callback). Just display the latest.
+                    flow.collect { currentText ->
+                        onSegment(currentText)
+                        dao.updateTranscription(entity.id, currentText.trim(), TranscriptionStatus.IN_PROGRESS)
                     }
                 }
             } else null
 
             try {
-                whisperEngine.transcribeWithTimings(decoded.samples, flow)
+                engine.transcribeWithTimings(decoded.samples, flow)
             } finally {
                 collectJob?.cancel()
             }
         }
-        val whisperMs = (System.nanoTime() - whisperStart) / 1_000_000
+        val inferMs = (System.nanoTime() - whisperStart) / 1_000_000
         val totalMs = (System.nanoTime() - totalStart) / 1_000_000
-        val rtf = if (decoded.durationMs > 0) whisperMs.toDouble() / decoded.durationMs else 0.0
-        Log.d(TAG, "PERF whisper=${whisperMs}ms segments=${result.segments.size} rtf=%.2fx".format(rtf))
-        Log.d(TAG, "PERF total=${totalMs}ms (model=${modelMs} decode=${decodeMs} whisper=${whisperMs}) audio=${audioSec}s file=${entity.filename}")
+        val rtf = if (decoded.durationMs > 0) inferMs.toDouble() / decoded.durationMs else 0.0
+        Log.d(TAG, "PERF infer=${inferMs}ms engine=${selectedModel.engine} segments=${result.segments.size} rtf=%.2fx".format(rtf))
+        Log.d(TAG, "PERF total=${totalMs}ms (model=${modelMs} decode=${decodeMs} infer=${inferMs}) audio=${audioSec}s file=${entity.filename}")
 
-        val segmentsJson = result.segments.joinToString("\n") { "${it.startMs}|${it.endMs}|${it.text}" }
-        val modelName = whisperEngine.getCurrentModelName()
-            ?.removePrefix("ggml-")?.removeSuffix(".bin") ?: ""
+        val segmentsJson = com.watranscribe.data.local.SegmentsCodec.encode(result.segments)
+        val modelName = engine.getCurrentModelName()
+            ?.removePrefix("ggml-")?.removeSuffix(".bin") ?: selectedModel.id
+        Log.d(TAG, "DB write: id=${entity.id} text=${result.text.trim().length}chars segments_json=${segmentsJson.length}bytes model=$modelName")
         dao.updateTranscriptionWithSegments(entity.id, result.text.trim(), TranscriptionStatus.COMPLETED, segmentsJson, modelName)
 
         result.text.trim()

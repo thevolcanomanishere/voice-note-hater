@@ -13,6 +13,7 @@ data class BenchmarkResult(
     val modelId: String,
     val modelName: String,
     val modelSizeMb: Int,
+    val engineId: String,
     val audioSeconds: Double,
     val loadMs: Long,
     val decodeMs: Long,
@@ -26,28 +27,32 @@ data class BenchmarkResult(
 @Singleton
 class Benchmarker @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val whisperEngine: WhisperEngine,
+    private val engines: Map<String, @JvmSuppressWildcards TranscriptionEngine>,
     private val audioDecoder: AudioDecoder,
     private val modelManager: ModelManager
 ) {
     /**
      * Benchmark a single model against a given audio URI.
-     * Returns null if the model isn't downloaded.
+     * Returns null if the model isn't downloaded or its engine isn't registered.
      */
     suspend fun benchmarkModel(model: ModelInfo, audioUri: Uri): BenchmarkResult? {
         if (!modelManager.isDownloaded(model)) return null
+        val engine = engines[model.engine] ?: run {
+            Log.e(TAG, "No engine registered for ${model.engine} (model ${model.id})")
+            return null
+        }
 
-        Log.d(TAG, "Benchmarking ${model.id}...")
+        Log.d(TAG, "Benchmarking ${model.id} on engine=${model.engine}...")
 
-        // Force unload current model
-        whisperEngine.release()
+        // Force unload all engines so we're measuring cold-load, not model swap.
+        for (e in engines.values) e.release()
 
         // Load model
         val loadStart = System.nanoTime()
         try {
-            whisperEngine.loadModel(model.filename)
+            engine.loadModel(model.filename)
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to load ${model.filename}", e)
+            Log.e(TAG, "Failed to load ${model.filename} on ${model.engine}", e)
             return null
         }
         val loadMs = (System.nanoTime() - loadStart) / 1_000_000
@@ -60,18 +65,19 @@ class Benchmarker @Inject constructor(
 
         // Inference
         val inferStart = System.nanoTime()
-        val result = whisperEngine.transcribeWithTimings(decoded.samples, null)
+        val result = engine.transcribeWithTimings(decoded.samples, null)
         val inferMs = (System.nanoTime() - inferStart) / 1_000_000
 
         val totalMs = loadMs + decodeMs + inferMs
         val rtf = if (decoded.durationMs > 0) inferMs.toDouble() / decoded.durationMs else 0.0
 
-        Log.d(TAG, "Benchmark ${model.id}: load=${loadMs}ms decode=${decodeMs}ms infer=${inferMs}ms total=${totalMs}ms rtf=%.2fx".format(rtf))
+        Log.d(TAG, "Benchmark ${model.id} (${model.engine}): load=${loadMs}ms decode=${decodeMs}ms infer=${inferMs}ms total=${totalMs}ms rtf=%.2fx".format(rtf))
 
         return BenchmarkResult(
             modelId = model.id,
             modelName = model.displayName,
             modelSizeMb = model.sizeMb,
+            engineId = model.engine,
             audioSeconds = audioSec,
             loadMs = loadMs,
             decodeMs = decodeMs,

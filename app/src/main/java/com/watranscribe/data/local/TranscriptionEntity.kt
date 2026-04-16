@@ -20,8 +20,20 @@ data class TranscriptionEntity(
     @ColumnInfo(name = "model_used", defaultValue = "") val modelUsed: String = ""
 )
 
-/** A single timed segment: text with start/end in milliseconds */
-data class TimedSegment(val text: String, val startMs: Long, val endMs: Long)
+/** A single word with start/end times in milliseconds. */
+data class TimedWord(val text: String, val startMs: Long, val endMs: Long)
+
+/**
+ * A single timed segment: text with start/end in milliseconds.
+ * [words] is populated by engines that expose word-level timings (Moonshine);
+ * whisper leaves it empty and the UI falls back to whole-segment lerp.
+ */
+data class TimedSegment(
+    val text: String,
+    val startMs: Long,
+    val endMs: Long,
+    val words: List<TimedWord> = emptyList(),
+)
 
 enum class TranscriptionStatus {
     PENDING, IN_PROGRESS, COMPLETED, FAILED

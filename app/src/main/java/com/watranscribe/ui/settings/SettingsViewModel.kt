@@ -5,10 +5,11 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.watranscribe.data.repository.PreferencesRepository
 import com.watranscribe.data.repository.TranscriptionRepository
+import android.util.Log
 import com.watranscribe.engine.ModelInfo
 import com.watranscribe.engine.ModelManager
+import com.watranscribe.engine.TranscriptionEngine
 import com.watranscribe.engine.TranscriptionNotifier
-import com.watranscribe.engine.WhisperEngine
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -25,7 +26,7 @@ class SettingsViewModel @Inject constructor(
     private val transcriptionRepo: TranscriptionRepository,
     private val notifier: TranscriptionNotifier,
     val modelManager: ModelManager,
-    private val whisperEngine: WhisperEngine
+    private val engines: Map<String, @JvmSuppressWildcards TranscriptionEngine>
 ) : ViewModel() {
 
     val folderUri = prefsRepo.folderUri.stateIn(
@@ -69,9 +70,23 @@ class SettingsViewModel @Inject constructor(
 
     fun onModelSelected(model: ModelInfo) {
         viewModelScope.launch {
+            Log.d("SettingsVM", "onModelSelected id=${model.id} engine=${model.engine} file=${model.filename}")
             prefsRepo.setModelSize(model.id)
-            // Load the new model
-            whisperEngine.loadModel(model.filename)
+            // Warm up the selected engine for the next transcription.
+            // Do NOT release the other engine here — a transcription may be in flight and
+            // freeing its native context mid-inference causes a SIGSEGV. The next engine
+            // load inside that engine will release its own prior model safely under a mutex.
+            val engine = engines[model.engine]
+            if (engine == null) {
+                Log.e("SettingsVM", "No engine registered for '${model.engine}'")
+                return@launch
+            }
+            try {
+                engine.loadModel(model.filename)
+                Log.d("SettingsVM", "Loaded ${model.id} on ${model.engine}")
+            } catch (t: Throwable) {
+                Log.e("SettingsVM", "Failed to load ${model.id}", t)
+            }
         }
     }
 

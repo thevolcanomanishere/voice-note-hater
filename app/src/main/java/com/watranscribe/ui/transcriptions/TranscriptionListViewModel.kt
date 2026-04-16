@@ -10,7 +10,6 @@ import com.watranscribe.data.repository.TranscriptionRepository
 import com.watranscribe.engine.ModelInfo
 import com.watranscribe.engine.ModelManager
 import com.watranscribe.engine.TranscriptionNotifier
-import com.watranscribe.engine.WhisperEngine
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -28,8 +27,7 @@ class TranscriptionListViewModel @Inject constructor(
     private val repo: TranscriptionRepository,
     private val prefsRepo: PreferencesRepository,
     private val notifier: TranscriptionNotifier,
-    private val modelManager: ModelManager,
-    private val whisperEngine: WhisperEngine
+    private val modelManager: ModelManager
 ) : ViewModel() {
 
     private val _searchQuery = MutableStateFlow("")
@@ -112,10 +110,9 @@ class TranscriptionListViewModel @Inject constructor(
             val label = entity.contact.ifBlank { entity.filename }
             val notifId = notifier.notifyProgress(label, "")
             try {
-                // Force load the requested model
-                whisperEngine.loadModel(model.filename)
                 val result = repo.transcribe(
-                    entity.copy(status = TranscriptionStatus.PENDING)
+                    entity = entity.copy(status = TranscriptionStatus.PENDING),
+                    modelOverride = model
                 ) { partialText ->
                     _liveText.value = partialText
                     notifier.updateProgress(notifId, label, partialText)

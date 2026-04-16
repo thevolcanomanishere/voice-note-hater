@@ -50,6 +50,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -276,14 +277,9 @@ private fun TranscriptionCard(
     val clipboardManager = LocalClipboardManager.current
     val context = LocalContext.current
 
-    // Parse timed segments
+    // Parse timed segments (JSON for new records, legacy pipe format for old whisper rows)
     val segments = remember(entity.segmentsJson) {
-        if (entity.segmentsJson.isBlank()) emptyList()
-        else entity.segmentsJson.lines().filter { it.isNotBlank() }.mapNotNull { line ->
-            val parts = line.split("|", limit = 3)
-            if (parts.size == 3) TimedSegment(parts[2], parts[0].toLongOrNull() ?: 0, parts[1].toLongOrNull() ?: 0)
-            else null
-        }
+        com.watranscribe.data.local.SegmentsCodec.parse(entity.segmentsJson)
     }
 
     // Track playback position in ms for highlighting
@@ -393,6 +389,7 @@ private fun TranscriptionCard(
             Spacer(Modifier.height(12.dp))
             AudioPlayer(
                 uri = entity.uri,
+                knownDurationMs = entity.durationMs,
                 isPlaying = isPlaying,
                 onPlayingChanged = onPlayingChanged,
                 onPositionUpdate = { playbackMs = it }
@@ -452,22 +449,37 @@ private fun TranscriptionCard(
     }
 }
 
+// Small offset to cover MediaPlayer's startup lag (typically 30-60ms between
+// mp.start() returning and actual audio output). Real word timings from
+// Moonshine's streaming API are tight — only audio-pipeline latency remains.
+private const val WORD_HIGHLIGHT_LAG_MS = 40
+
 @Composable
 private fun TimedText(segments: List<TimedSegment>, currentMs: Int) {
+    val grey = Color(0xFF555555)
+    val activeWhite = Color.White
+    val effectiveMs = currentMs - WORD_HIGHLIGHT_LAG_MS
+
     val annotated = buildAnnotatedString {
-        for (segment in segments) {
-            val fraction = if (currentMs >= segment.endMs) 1f
-            else if (currentMs <= segment.startMs) 0f
-            else (currentMs - segment.startMs).toFloat() / (segment.endMs - segment.startMs).coerceAtLeast(1)
-
-            // Interpolate color from grey to white based on playback position
-            val grey = Color(0xFF555555)
-            val white = Color(0xFFE5E5E5)
-            val color = lerp(grey, white, fraction.coerceIn(0f, 1f))
-
-            withStyle(SpanStyle(color = color)) {
-                append(segment.text)
+        for ((segIndex, segment) in segments.withIndex()) {
+            if (segment.words.isNotEmpty()) {
+                // Karaoke-style word highlighting: each word pops to white the
+                // moment playback reaches it (+ small lag for audio sync).
+                for ((wIdx, w) in segment.words.withIndex()) {
+                    val color = if (effectiveMs >= w.startMs) activeWhite else grey
+                    withStyle(SpanStyle(color = color)) { append(w.text) }
+                    if (wIdx != segment.words.lastIndex) {
+                        withStyle(SpanStyle(color = color)) { append(' ') }
+                    }
+                }
+            } else {
+                // Whisper records already expose per-token segments — treat each
+                // segment as a pop-in unit (same behaviour as word-level above).
+                val color = if (effectiveMs >= segment.startMs) activeWhite else grey
+                withStyle(SpanStyle(color = color)) { append(segment.text) }
             }
+            // Space between segments
+            if (segIndex != segments.lastIndex) append(' ')
         }
     }
     Text(text = annotated, style = MaterialTheme.typography.bodyMedium)
@@ -485,6 +497,7 @@ private fun lerp(a: Color, b: Color, t: Float): Color {
 @Composable
 private fun AudioPlayer(
     uri: String,
+    knownDurationMs: Long,
     isPlaying: Boolean,
     onPlayingChanged: (Boolean) -> Unit,
     onPositionUpdate: (Int) -> Unit
@@ -492,8 +505,18 @@ private fun AudioPlayer(
     val context = LocalContext.current
     var player by remember { mutableStateOf<MediaPlayer?>(null) }
     var progress by remember { mutableFloatStateOf(0f) }
-    var durationMs by remember { mutableIntStateOf(0) }
+    // MediaPlayer.duration AND MediaPlayer.currentPosition are both unreliable for
+    // .opus files (currentPosition often jumps ahead of real audio). We drive the
+    // progress bar off wall-clock time instead: audio plays at 1x, so elapsed
+    // wall-clock since play/seek start = audio position. Duration comes from the
+    // scan-time MediaMetadataRetriever value which is accurate.
+    var durationMs by remember(knownDurationMs) { mutableIntStateOf(knownDurationMs.toInt().coerceAtLeast(1)) }
     var isSeeking by remember { mutableStateOf(false) }
+    // Wall-clock anchor: (anchorWallMs, anchorPosMs) means "at system clock
+    // `anchorWallMs`, audio playhead was at `anchorPosMs`". We reset this on
+    // play-start and on seek-finish.
+    var anchorWallMs by remember { mutableLongStateOf(0L) }
+    var anchorPosMs by remember { mutableIntStateOf(0) }
 
     DisposableEffect(uri) {
         onDispose {
@@ -506,16 +529,15 @@ private fun AudioPlayer(
     LaunchedEffect(isPlaying) {
         while (isPlaying) {
             if (!isSeeking) {
-                player?.let { mp ->
-                    if (mp.isPlaying) {
-                        val pos = mp.currentPosition
-                        durationMs = mp.duration.coerceAtLeast(1)
-                        progress = pos.toFloat() / durationMs
-                        onPositionUpdate(pos)
-                    }
+                val mp = player
+                if (mp != null && mp.isPlaying) {
+                    val elapsed = System.currentTimeMillis() - anchorWallMs
+                    val posMs = (anchorPosMs + elapsed).toInt().coerceIn(0, durationMs)
+                    progress = posMs.toFloat() / durationMs
+                    onPositionUpdate(posMs)
                 }
             }
-            delay(50)
+            delay(30)
         }
     }
 
@@ -538,7 +560,6 @@ private fun AudioPlayer(
                     player = MediaPlayer().apply {
                         setDataSource(context, Uri.parse(uri))
                         prepare()
-                        durationMs = duration
                         setOnCompletionListener {
                             progress = 1f
                             onPositionUpdate(0)
@@ -546,6 +567,8 @@ private fun AudioPlayer(
                         }
                         start()
                     }
+                    anchorPosMs = 0
+                    anchorWallMs = System.currentTimeMillis()
                     onPlayingChanged(true)
                 }
             },
@@ -570,9 +593,11 @@ private fun AudioPlayer(
                 },
                 onValueChangeFinished = {
                     player?.let { mp ->
-                        val seekTo = (progress * mp.duration).toInt()
+                        val seekTo = (progress * durationMs).toInt()
                         mp.seekTo(seekTo)
                         onPositionUpdate(seekTo)
+                        anchorPosMs = seekTo
+                        anchorWallMs = System.currentTimeMillis()
                     }
                     isSeeking = false
                 },
