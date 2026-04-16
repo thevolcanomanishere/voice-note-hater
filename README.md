@@ -6,12 +6,13 @@ An Android app that transcribes WhatsApp voice notes locally on your device. No 
 
 ## What it does
 
-- Transcribes WhatsApp voice notes using [whisper.cpp](https://github.com/ggerganov/whisper.cpp) running entirely on-device
-- Auto-detects new incoming voice notes and transcribes them in the background
-- Identifies who sent each voice note from WhatsApp notifications
-- Streams transcription text as it's being processed
-- Highlights words in sync during audio playback
-- Supports multiple whisper models — from 32MB (fast) to 874MB (best quality)
+- Transcribes WhatsApp voice notes using two on-device engines: [whisper.cpp](https://github.com/ggerganov/whisper.cpp) and [Moonshine](https://github.com/usefulsensors/moonshine) (via the official `ai.moonshine:moonshine-voice` Android SDK)
+- Auto-detects new incoming voice notes via a `NotificationListenerService` and transcribes them in the background
+- Identifies who sent each voice note from WhatsApp notifications (DMs and groups)
+- Streams transcription text live as it's processed
+- Karaoke-style highlighting during audio playback — each word/line pops to white in sync with audio
+- 9 whisper models + 3 Moonshine models to pick from
+- Compares any two models side-by-side on your own voice notes with the built-in benchmark
 
 ## Screenshots
 
@@ -24,34 +25,34 @@ An Android app that transcribes WhatsApp voice notes locally on your device. No 
 ## Features
 
 **Transcription**
-- Tap any voice note to transcribe it on-demand
-- Streaming text — watch words appear as whisper processes
-- Timed word highlighting during audio playback
-- Long-press to copy full transcription
+- Tap any voice note to transcribe on-demand
+- Live streaming text — watch words appear as the engine processes
+- Karaoke-style word / line highlighting during playback, driven off wall-clock timing (audio and text stay in lock-step even on opus files where `MediaPlayer.currentPosition` lies)
+- Long-press to copy the full transcript
+- Retranscribe any voice note with a different model — the result is saved with the model name attached
 
 **Auto-transcribe**
-- Detects incoming voice notes via Android's NotificationListenerService
-- Captures sender name from WhatsApp notifications (DMs and groups)
-- Auto-transcribes new voice notes and shows result as a notification
-- Zero battery impact when idle — only wakes on WhatsApp notification
+- `NotificationListenerService` catches WhatsApp voice-message posts, extracts sender (or "Sender @ Group" for groups), and fires a one-shot `QuickTranscribeWorker` via WorkManager
+- On bind, the listener replays any WhatsApp notifications already in the tray (Android doesn't do this automatically after the OS kills the app)
+- Optional 15-minute backup scan catches anything the listener missed because the OS froze our process — can be toggled off in Settings
+- Both paths post progress + completion notifications
+- Zero work when idle: no persistent foreground service
 
-**Models**
-- Download models in-app from HuggingFace
-- 9 models available: Tiny Q5 (32MB) through Turbo Q8 (874MB)
-- Built-in benchmark to compare speed/quality on your device
-- Retranscribe any voice note with a different model to compare
-- Each transcription records which model produced it
+**Engines & models**
+- Choose per-transcription which engine and model to use
+- Long-press a downloaded model to delete it
+- Built-in benchmark with a multi-select picker, engine badges, and side-by-side speed/transcript comparison
 
-**Audio**
-- Built-in audio player with progress bar
-- Opus decoding via Android MediaCodec
-- Resampling to 16kHz mono for whisper input
+**Storage & UI**
+- Dark mode only (pure black)
+- Model storage usage visible at a glance
+- Battery-optimization shortcut in Settings — one tap to whitelist the app so the listener stays alive on aggressive OEMs (OnePlus / Oppo / Xiaomi etc.)
 
 ## Requirements
 
 - Android 8.0+ (API 26)
 - arm64-v8a device (covers 99%+ of modern Android phones)
-- ~150MB minimum for the Base model, more for larger models
+- ~30MB minimum (Moonshine Tiny) / ~150MB (Whisper Base)
 - WhatsApp installed with voice notes accessible via Storage Access Framework
 
 ## Building
@@ -62,7 +63,7 @@ export ANDROID_HOME=/opt/homebrew/share/android-commandlinetools  # or your SDK 
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-See [CLAUDE.md](CLAUDE.md) for detailed development guide including native lib rebuilding, DB migrations, and debugging.
+See [CLAUDE.md](CLAUDE.md) for the detailed development guide: native lib rebuilding, DB migrations, JNI bridge, debugging commands.
 
 ## Tech Stack
 
@@ -70,35 +71,59 @@ See [CLAUDE.md](CLAUDE.md) for detailed development guide including native lib r
 |---|---|
 | Language | Kotlin |
 | UI | Jetpack Compose |
-| Architecture | MVVM + Repository |
-| DI | Hilt |
-| DB | Room (SQLite) |
+| Architecture | MVVM + Repository + `TranscriptionEngine` interface |
+| DI | Hilt (engine multi-binding `Map<String, TranscriptionEngine>`) |
+| DB | Room (SQLite), JSON segments format with optional per-word timings |
 | Async | Coroutines + Flow |
 | Background | WorkManager + NotificationListenerService |
-| Transcription | whisper.cpp via JNI |
+| Engines | whisper.cpp (JNI) · Moonshine (`ai.moonshine:moonshine-voice`) |
 | File Access | Storage Access Framework |
-| Audio | MediaCodec + MediaExtractor |
+| Audio | MediaCodec + MediaExtractor → 16 kHz mono float PCM |
 
 ## Models
 
+### Whisper (via whisper.cpp)
+
 | Model | Size | Speed | Quality | Languages |
 |---|---|---|---|---|
-| Tiny Q5 | 32MB | ~8x realtime | Fair | English |
-| Base | 148MB | ~2x realtime | Good | English |
-| Small Q5 | 190MB | ~1.5x realtime | High | English |
-| Small | 488MB | ~1x realtime | High | English |
-| Turbo Q5 | 574MB | ~0.5x realtime | Excellent | All |
-| Turbo Q8 | 874MB | ~0.4x realtime | Best | All |
+| Tiny Q5 | 32 MB | ~8× realtime | Fair | English |
+| Tiny | 78 MB | ~8× realtime | Fair | English |
+| Base Q5 | 60 MB | ~3× realtime | Good | English |
+| Base | 148 MB | ~2× realtime | Good | English |
+| Small Q5 | 190 MB | ~1.5× realtime | High | English |
+| Small | 488 MB | ~1× realtime | High | English |
+| Medium Q5 | 539 MB | ~0.6× realtime | Very high | English |
+| Turbo Q5 | 574 MB | ~0.5× realtime | Excellent | All |
+| Turbo Q8 | 874 MB | ~0.4× realtime | Best | All |
 
-Speed measured on a mid-range 2024 Android phone (8 cores). Your results will vary — use the built-in benchmark.
+Whisper provides fine-grained per-token timestamps, which the UI already uses for word-level highlighting.
+
+### Moonshine (via official `ai.moonshine:moonshine-voice` SDK)
+
+| Model | Size on disk | WER | Notes |
+|---|---|---|---|
+| Moonshine Tiny (EN) | ~42 MB | 12.7% | Fastest — great for quick previews |
+| Moonshine Base (EN) | ~120 MB | 10.0% | Better accuracy, still lightweight |
+| Moonshine Medium Streaming (EN) | ~245 MB | 6.65% | Best quality — streaming architecture |
+
+Moonshine handles any audio length natively (no 30 s zero-padding like Whisper). Line-level timings are precise and come directly from the model; the SDK currently doesn't expose per-word timings, so Moonshine transcripts highlight at line granularity.
+
+Speed figures are indicative — measured on a Pixel-class device. Run the built-in benchmark (Settings → Benchmark models) for numbers on your own hardware.
 
 ## How it works
 
-1. **First launch** — grant folder access to WhatsApp Voice Notes via Android's folder picker
-2. **Scan** — indexes `.opus` files from WhatsApp's `YYYYWW/PTT-YYYYMMDD-WANNNN.opus` structure
-3. **Transcribe** — decodes opus to PCM, resamples to 16kHz mono, runs whisper.cpp inference
-4. **Auto-detect** — NotificationListenerService catches WhatsApp voice message notifications, extracts sender name, triggers background transcription
-5. **Results** — transcription stored in Room DB with timed segments for word-level playback highlighting
+1. **First launch** — grant folder access to WhatsApp Voice Notes via Android's folder picker. Grant notification access so the listener can detect new voice notes. If you're on OnePlus / Oppo / Xiaomi, tap the "Allow background activity" row in Settings to whitelist the app from battery optimization — otherwise the OS will freeze the listener.
+2. **Scan** — indexes `.opus` files from WhatsApp's `YYYYWW/PTT-YYYYMMDD-WANNNN.opus` structure via ContentResolver.
+3. **Transcribe** — decodes opus → PCM → 16 kHz mono float, routes to the selected engine (`WhisperEngine` or `MoonshineEngine`) via the common `TranscriptionEngine` interface.
+4. **Auto-detect** — `WhatsAppNotificationListener` catches voice-message notifications, extracts sender, triggers `QuickTranscribeWorker`. Transcription completes with a notification showing the text.
+5. **Results** — stored in Room with JSON `segments_json` (start/end/text per line, optional word array) and the model name. Playback highlights at word granularity for whisper, line granularity for Moonshine.
+
+## Architecture notes
+
+- `TranscriptionEngine` interface has two implementations wired via Hilt multi-binding. Each engine is a `@Singleton` with its own suspending `loadModel` / `transcribeWithTimings` / `release` methods, all guarded by a coroutine `Mutex` so a model switch can never race with an in-flight inference (this used to cause SIGSEGVs).
+- `SegmentsCodec` handles the DB column format. New rows are JSON; old pipe-separated whisper rows still parse via a fallback branch.
+- Moonshine uses the streaming API (`addAudioToStream` in ~1 s chunks) even for batch files — that's the path that emits live `LineStarted` / `LineTextChanged` / `LineCompleted` events for UI streaming. Events fire synchronously on the caller thread per the SDK source, so there's no completion barrier to wait on.
+- The audio player's slider tracks wall-clock elapsed time since play/seek start, not `MediaPlayer.currentPosition` — the latter is unreliable on `.opus`.
 
 ## License
 

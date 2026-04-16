@@ -265,6 +265,20 @@ fun SettingsScreen(
                         )
                     )
                 }
+
+                // Battery-optimization shortcut — without this, many phones
+                // (especially OnePlus/Oppo/Xiaomi) freeze our process and the
+                // notification listener stops receiving WhatsApp events.
+                val batteryExempt = isIgnoringBatteryOptimizations(context)
+                SettingsRow(
+                    label = if (batteryExempt) "Battery: unrestricted ✓" else "Allow background activity",
+                    sublabel = if (batteryExempt) {
+                        "Tap to change"
+                    } else {
+                        "Required so WhatsApp notifications can auto-trigger transcribes"
+                    },
+                    onClick = { openBatterySettings(context) }
+                )
             }
 
             Spacer(Modifier.height(8.dp))
@@ -369,4 +383,40 @@ private fun SettingsRow(label: String, sublabel: String, onClick: () -> Unit) {
 
 private fun isNotificationListenerEnabled(context: android.content.Context): Boolean {
     return com.watranscribe.engine.WhatsAppNotificationListener.isEnabled(context)
+}
+
+private fun isIgnoringBatteryOptimizations(context: android.content.Context): Boolean {
+    val pm = context.getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager
+    return pm.isIgnoringBatteryOptimizations(context.packageName)
+}
+
+/**
+ * Opens the system "battery optimization" screen so the user can whitelist us.
+ * Stock Android honours ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS as a direct
+ * per-app prompt; OEMs (Oppo / OnePlus / Xiaomi / etc.) often silently reject
+ * that intent or lack the screen entirely, so we progressively fall back to the
+ * generic ignore-list, then to the app's info page where the user can navigate
+ * to Battery / Autostart manually.
+ */
+private fun openBatterySettings(context: android.content.Context) {
+    val pkg = context.packageName
+    val candidates = listOf(
+        android.content.Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+            data = android.net.Uri.parse("package:$pkg")
+            flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+        },
+        android.content.Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).apply {
+            flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+        },
+        android.content.Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+            data = android.net.Uri.parse("package:$pkg")
+            flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+        },
+    )
+    for (intent in candidates) {
+        if (intent.resolveActivity(context.packageManager) != null) {
+            context.startActivity(intent)
+            return
+        }
+    }
 }
