@@ -53,6 +53,9 @@ interface TranscriptionDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insert(transcription: TranscriptionEntity): Long
 
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertAll(transcriptions: List<TranscriptionEntity>): List<Long>
+
     @Update
     suspend fun update(transcription: TranscriptionEntity)
 

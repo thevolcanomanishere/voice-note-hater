@@ -35,6 +35,7 @@ class TranscriptionListViewModel @Inject constructor(
     private val notifier: TranscriptionNotifier,
     private val modelManager: ModelManager
 ) : ViewModel() {
+    private var didInitialScan = false
 
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
@@ -53,7 +54,7 @@ class TranscriptionListViewModel @Inject constructor(
     private val _isScanning = MutableStateFlow(false)
     val isScanning: StateFlow<Boolean> = _isScanning.asStateFlow()
 
-    private val _sortMode = MutableStateFlow(ListSortMode.NEWEST)
+    private val _sortMode = MutableStateFlow(ListSortMode.WEEK_BUCKETS)
     val sortMode: StateFlow<ListSortMode> = _sortMode.asStateFlow()
 
     /** ID of the item currently being transcribed, for UI indication */
@@ -68,7 +69,26 @@ class TranscriptionListViewModel @Inject constructor(
         _searchQuery.value = query
     }
 
+    init {
+        viewModelScope.launch {
+            maybeInitialScan()
+        }
+    }
+
+    private suspend fun maybeInitialScan() {
+        if (didInitialScan) return
+        val uriStr = prefsRepo.folderUri.first() ?: return
+        didInitialScan = true
+        _isScanning.value = true
+        try {
+            repo.scanForNewFiles(Uri.parse(uriStr))
+        } finally {
+            _isScanning.value = false
+        }
+    }
+
     fun scanNow() {
+        if (_isScanning.value) return
         viewModelScope.launch {
             _isScanning.value = true
             try {

@@ -64,15 +64,13 @@ fun OnboardingScreen(
     }
 
     val folderPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        if (result.resultCode == Activity.RESULT_OK) {
-            result.data?.data?.let { uri ->
-                val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION
-                context.contentResolver.takePersistableUriPermission(uri, flags)
-                viewModel.onFolderSelected(uri)
-                onComplete()
-            }
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri != null) {
+            val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION
+            context.contentResolver.takePersistableUriPermission(uri, flags)
+            viewModel.onFolderSelected(uri)
+            onComplete()
         }
     }
 
@@ -162,8 +160,7 @@ fun OnboardingScreen(
 
         Button(
             onClick = {
-                val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
-                folderPickerLauncher.launch(intent)
+                folderPickerLauncher.launch(null)
             },
             enabled = notificationsEnabled,
             modifier = Modifier
@@ -178,6 +175,7 @@ fun OnboardingScreen(
             Text(
                 text = "Select Voice Notes Folder",
                 style = MaterialTheme.typography.labelLarge.copy(
+                    color = if (notificationsEnabled) Color.Black else Color(0xFF666666),
                     fontWeight = FontWeight.SemiBold
                 )
             )

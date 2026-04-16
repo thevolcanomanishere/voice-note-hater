@@ -1,6 +1,5 @@
 package com.watranscribe.ui.settings
 
-import android.app.Activity
 import android.content.Intent
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -71,14 +70,12 @@ fun SettingsScreen(
     val transcriptionCount by viewModel.transcriptionCount.collectAsState()
 
     val folderPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        if (result.resultCode == Activity.RESULT_OK) {
-            result.data?.data?.let { uri ->
-                val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION
-                context.contentResolver.takePersistableUriPermission(uri, flags)
-                viewModel.onFolderSelected(uri)
-            }
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri != null) {
+            val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION
+            context.contentResolver.takePersistableUriPermission(uri, flags)
+            viewModel.onFolderSelected(uri)
         }
     }
 
@@ -130,7 +127,7 @@ fun SettingsScreen(
                     } ?: "Not set",
                     sublabel = "Tap to change",
                     onClick = {
-                        folderPickerLauncher.launch(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE))
+                        folderPickerLauncher.launch(null)
                     }
                 )
                 folderResolutionHint?.let { hint ->

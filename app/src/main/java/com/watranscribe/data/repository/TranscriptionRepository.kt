@@ -20,6 +20,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.util.ArrayDeque
 import java.util.Locale
@@ -44,6 +46,8 @@ class TranscriptionRepository @Inject constructor(
     @ApplicationContext private val context: Context
 ) {
     private val resolvedVoiceRootCache = mutableMapOf<String, String>()
+    private fun isSaneDurationMs(ms: Long): Boolean = ms in 1L..MAX_REASONABLE_AUDIO_DURATION_MS
+    private val scanMutex = Mutex()
 
     fun getAllTranscriptions(): Flow<List<TranscriptionEntity>> = dao.getAllTranscriptions()
 
@@ -65,6 +69,7 @@ class TranscriptionRepository @Inject constructor(
      * Structure: root / YYYYWW / PTT-YYYYMMDD-WANNNN.opus
      */
     suspend fun scanForNewFiles(folderUri: Uri): Int = withContext(Dispatchers.IO) {
+        scanMutex.withLock {
         Log.d(TAG, "scanForNewFiles: starting with URI=$folderUri")
         val resolver = context.contentResolver
 
@@ -109,9 +114,10 @@ class TranscriptionRepository @Inject constructor(
         }
         Log.d(TAG, "scanForNewFiles: found ${weekFolders.size} week folders")
 
-        // Step 2: query each week folder for .opus files
+        // Step 2: query each week folder for .opus files.
         var newCount = 0
-        val batch = mutableListOf<TranscriptionEntity>()
+        val toInsert = ArrayList<TranscriptionEntity>(512)
+        val existingForDurationFix = ArrayList<TranscriptionEntity>(128)
 
         for ((docId, folderName) in weekFolders) {
             val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(folderUri, docId)
@@ -132,43 +138,56 @@ class TranscriptionRepository @Inject constructor(
                 val fileIdIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
 
                 while (cursor.moveToNext()) {
-                    val name = cursor.getString(nameIdx)
+                    val name = cursor.getString(nameIdx) ?: continue
                     if (!name.endsWith(".opus", ignoreCase = true)) continue
                     val lastMod = cursor.getLong(modIdx)
                     val fileDocId = cursor.getString(fileIdIdx)
                     val fileUri = DocumentsContract.buildDocumentUriUsingTree(folderUri, fileDocId)
 
-                    val durationMs = getDuration(fileUri)
-                    batch.add(
-                        TranscriptionEntity(
-                            filename = name,
-                            uri = fileUri.toString(),
-                            transcription = null,
-                            durationMs = durationMs,
-                            conversationFolder = weekLabel,
-                            lastModified = lastMod,
-                            createdAt = parseDateFromFilename(name) ?: lastMod
-                        )
+                    // Keep scan lightweight: don't decode metadata duration here.
+                    // Duration is backfilled when the file is transcribed.
+                    val durationMs = 0L
+                    val entity = TranscriptionEntity(
+                        filename = name,
+                        uri = fileUri.toString(),
+                        transcription = null,
+                        durationMs = durationMs,
+                        conversationFolder = weekLabel,
+                        lastModified = lastMod,
+                        createdAt = parseDateFromFilename(name) ?: lastMod
                     )
+
+                    val contact = PendingContactMatch.consumeMatch(entity.lastModified) ?: ""
+                    toInsert.add(entity.copy(contact = contact))
                 }
             }
         }
 
-        // Step 3: bulk insert, skipping existing. Try to match contacts for new files.
-        for (entity in batch) {
-            val existing = dao.findByFileAndModified(entity.filename, entity.lastModified)
-            if (existing == null) {
-                val contact = PendingContactMatch.consumeMatch(entity.lastModified) ?: ""
-                dao.insert(entity.copy(contact = contact))
-                newCount++
-            } else if (!isSaneDurationMs(existing.durationMs) && isSaneDurationMs(entity.durationMs)) {
-                // Backfill/sanitize duration for existing entries when we now have a sane value.
-                dao.update(existing.copy(durationMs = entity.durationMs))
+        // Step 3: batch insert for UI smoothness.
+        if (toInsert.isNotEmpty()) {
+            val inserted = dao.insertAll(toInsert)
+            newCount += inserted.count { it != -1L }
+
+            // Only run expensive per-row lookups for entries that existed and have
+            // potentially useful duration data (rare now since durationMs is 0).
+            for (idx in inserted.indices) {
+                if (inserted[idx] != -1L) continue
+                val candidate = toInsert[idx]
+                if (!isSaneDurationMs(candidate.durationMs)) continue
+                val existing = dao.findByFileAndModified(candidate.filename, candidate.lastModified)
+                if (existing != null && !isSaneDurationMs(existing.durationMs)) {
+                    existingForDurationFix.add(existing.copy(durationMs = candidate.durationMs))
+                }
             }
         }
 
-        Log.d(TAG, "scanForNewFiles: inserted $newCount new files (${batch.size} total found)")
+        if (existingForDurationFix.isNotEmpty()) {
+            existingForDurationFix.forEach { dao.update(it) }
+        }
+
+        Log.d(TAG, "scanForNewFiles: inserted $newCount new files")
         newCount
+        }
     }
 
     suspend fun getFolderResolutionHint(folderUri: Uri): String? = withContext(Dispatchers.IO) {
@@ -582,4 +601,3 @@ class TranscriptionRepository @Inject constructor(
         dao.clearAllTranscriptions()
     }
 }
-    private fun isSaneDurationMs(ms: Long): Boolean = ms in 1L..MAX_REASONABLE_AUDIO_DURATION_MS
