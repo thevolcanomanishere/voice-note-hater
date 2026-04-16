@@ -40,11 +40,14 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -409,21 +412,110 @@ fun SettingsScreen(
 
                 // Action area
                 if (isBulkRunning) {
+                    var liveTextExpanded by remember { mutableStateOf(false) }
                     Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
                         val p = bulkProgress
                         if (p != null) {
-                            Text(
-                                "Transcribing ${p.current} / ${p.total}",
-                                style = MaterialTheme.typography.bodyLarge,
-                                color = Color.White,
-                            )
+                            // Wall-clock ticker for per-file elapsed time — updates every second
+                            // in the UI without needing the worker to emit progress.
+                            var elapsedSec by remember(p.fileStartedAtMs) { mutableLongStateOf(0L) }
+                            LaunchedEffect(p.fileStartedAtMs) {
+                                while (true) {
+                                    elapsedSec = (System.currentTimeMillis() - p.fileStartedAtMs) / 1000
+                                    delay(1000)
+                                }
+                            }
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    "${p.current} / ${p.total}",
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    color = Color.White,
+                                )
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    // Elapsed time on current file — key liveness signal
+                                    Text(
+                                        text = "${elapsedSec}s",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = Color(0xFF666666),
+                                    )
+                                    if (p.rtf != null) {
+                                        Text(
+                                            text = "%.2fx".format(p.rtf),
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = when {
+                                                p.rtf < 0.5 -> Color(0xFF4CAF50)
+                                                p.rtf < 1.5 -> Color(0xFF999999)
+                                                else -> Color(0xFFFF9800)
+                                            },
+                                        )
+                                    }
+                                    if (p.cpuMaxMhz > 0) {
+                                        Text(
+                                            text = "${p.cpuMaxMhz}MHz",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = Color(0xFF555555),
+                                        )
+                                    }
+                                    if (p.batteryTempC > 0f) {
+                                        Text(
+                                            text = "%.1f°C".format(p.batteryTempC),
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = when {
+                                                p.batteryTempC >= 45f -> Color(0xFFFF4500)
+                                                p.batteryTempC >= 40f -> Color(0xFFFF8C00)
+                                                else -> Color(0xFF555555)
+                                            },
+                                        )
+                                    }
+                                    if (p.thermalStatus > 0) {
+                                        val (label, color) = when (p.thermalStatus) {
+                                            1 -> "WARM" to Color(0xFFFFD700)
+                                            2 -> "HOT" to Color(0xFFFF8C00)
+                                            else -> "THROTTLED" to Color(0xFFFF4500)
+                                        }
+                                        Text(
+                                            text = label,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = Color.Black,
+                                            modifier = Modifier
+                                                .clip(androidx.compose.foundation.shape.RoundedCornerShape(4.dp))
+                                                .background(color)
+                                                .padding(horizontal = 5.dp, vertical = 2.dp),
+                                        )
+                                    }
+                                }
+                            }
                             Text(
                                 p.contact.ifBlank { p.filename },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = Color(0xFF999999),
                                 maxLines = 1,
                             )
-                            Spacer(Modifier.height(6.dp))
+
+                            // Live transcription text — shows what's being transcribed right now
+                            if (p.liveText.isNotBlank()) {
+                                Spacer(Modifier.height(6.dp))
+                                Text(
+                                    text = p.liveText,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color(0xFF555555),
+                                    maxLines = if (liveTextExpanded) Int.MAX_VALUE else 2,
+                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { liveTextExpanded = !liveTextExpanded },
+                                )
+                            }
+
+                            Spacer(Modifier.height(8.dp))
                             LinearProgressIndicator(
                                 progress = { p.current.toFloat() / p.total.coerceAtLeast(1) },
                                 modifier = Modifier
@@ -433,12 +525,30 @@ fun SettingsScreen(
                                 color = Color.White,
                                 trackColor = Color(0xFF333333),
                             )
-                            Spacer(Modifier.height(6.dp))
-                            Text(
-                                text = formatEta(p.etaMs, p.finishAtEpochMs),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = Color(0xFF999999),
-                            )
+                            Spacer(Modifier.height(4.dp))
+                            if (p.totalAudioMs > 0) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                ) {
+                                    Text(
+                                        text = "${formatBulkDuration(p.processedAudioMs)} / ${formatBulkDuration(p.totalAudioMs)} audio",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = Color(0xFF666666),
+                                    )
+                                    Text(
+                                        text = formatEta(p.etaMs, p.finishAtEpochMs),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = Color(0xFF999999),
+                                    )
+                                }
+                            } else {
+                                Text(
+                                    text = formatEta(p.etaMs, p.finishAtEpochMs),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color(0xFF999999),
+                                )
+                            }
                         } else {
                             Text("Starting…", style = MaterialTheme.typography.bodyLarge, color = Color.White)
                         }
@@ -596,7 +706,7 @@ private fun BulkStatRow(label: String, count: Int, durationMs: Long?) {
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(label, style = MaterialTheme.typography.bodyLarge, color = Color(0xFFAAAAAA))
-        val durStr = durationMs?.takeIf { it > 0 }?.let { " · ${formatBulkDuration(it)}" } ?: ""
+        val durStr = durationMs?.takeIf { it > 0 }?.let { " · ${formatBulkDuration(it)} audio" } ?: ""
         Text("$count$durStr", style = MaterialTheme.typography.bodyLarge, color = Color.White)
     }
 }
@@ -645,10 +755,10 @@ private fun formatBulkDuration(ms: Long): String {
 }
 
 private fun formatEta(etaMs: Long?, finishAtEpochMs: Long?): String {
-    if (etaMs == null || finishAtEpochMs == null) return "ETA: estimating…"
+    if (etaMs == null || finishAtEpochMs == null) return "ETA: …"
     val finishStr = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
         .format(java.util.Date(finishAtEpochMs))
-    return "ETA: ${formatBulkDuration(etaMs)} · done by $finishStr"
+    return "~${formatBulkDuration(etaMs)} · $finishStr"
 }
 
 private fun isNotificationListenerEnabled(context: android.content.Context): Boolean {
@@ -684,9 +794,11 @@ private fun openBatterySettings(context: android.content.Context) {
         },
     )
     for (intent in candidates) {
-        if (intent.resolveActivity(context.packageManager) != null) {
+        try {
             context.startActivity(intent)
             return
+        } catch (_: android.content.ActivityNotFoundException) {
+            // try next candidate
         }
     }
 }

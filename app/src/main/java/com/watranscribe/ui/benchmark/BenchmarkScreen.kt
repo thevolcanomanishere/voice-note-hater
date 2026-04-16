@@ -387,6 +387,51 @@ private fun ResultCard(result: BenchmarkResult, rank: Int, isFastest: Boolean) {
             )
         }
 
+        // Device state row
+        Spacer(Modifier.height(6.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (result.thermalStatus > 0) {
+                val (label, color) = when (result.thermalStatus) {
+                    1 -> "thermal: light" to Color(0xFFFFD700)
+                    2 -> "thermal: moderate" to Color(0xFFFF8C00)
+                    3 -> "thermal: severe" to Color(0xFFFF4500)
+                    4 -> "thermal: critical" to Color(0xFFFF0000)
+                    else -> "thermal: hot" to Color(0xFFFF0000)
+                }
+                Text(
+                    label,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color.Black,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(color)
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                )
+            }
+            if (result.cpuMaxMhz > 0) {
+                Text(
+                    "${result.cpuMaxMhz} MHz",
+                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                    color = Color(0xFF888888)
+                )
+            }
+            if (result.batteryTempC > 0f) {
+                Text(
+                    "%.1f°C".format(result.batteryTempC),
+                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                    color = when {
+                        result.batteryTempC >= 45f -> Color(0xFFFF4500)
+                        result.batteryTempC >= 40f -> Color(0xFFFF8C00)
+                        else -> Color(0xFF888888)
+                    }
+                )
+            }
+        }
+
         // Transcript preview (expanded)
         if (expanded) {
             Spacer(Modifier.height(10.dp))
