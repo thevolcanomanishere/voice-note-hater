@@ -12,6 +12,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -20,6 +21,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -298,6 +302,198 @@ fun SettingsScreen(
 
             Spacer(Modifier.height(8.dp))
 
+            // Bulk transcribe
+            val pendingCount by viewModel.pendingCount.collectAsState()
+            val failedCount by viewModel.failedCount.collectAsState()
+            val completedCount by viewModel.completedCount.collectAsState()
+            val pendingDurationMs by viewModel.pendingDurationMs.collectAsState()
+            val failedDurationMs by viewModel.failedDurationMs.collectAsState()
+            val bulkModelId by viewModel.bulkModelId.collectAsState()
+            val isBulkRunning by viewModel.isBulkRunning.collectAsState()
+            val bulkProgress by viewModel.bulkProgress.collectAsState()
+            var showBulkModelPicker by remember { mutableStateOf(false) }
+            var showClearConfirm by remember { mutableStateOf(false) }
+
+            val downloadedModelInfos = remember(downloadedModels) {
+                allModels.filter { it.id in downloadedModels }
+            }
+            val effectiveBulkModelId = bulkModelId ?: modelSize
+            val effectiveBulkModel = remember(effectiveBulkModelId, downloadedModelInfos) {
+                downloadedModelInfos.find { it.id == effectiveBulkModelId }
+                    ?: downloadedModelInfos.firstOrNull()
+            }
+            val workCount = pendingCount + failedCount
+
+            SettingsSection("Bulk Transcribe") {
+                BulkStatRow("Pending", pendingCount, pendingDurationMs)
+                BulkStatRow("Failed", failedCount, failedDurationMs)
+                BulkStatRow("Completed", completedCount, durationMs = null)
+
+                // Model picker
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(enabled = downloadedModelInfos.isNotEmpty()) {
+                            showBulkModelPicker = !showBulkModelPicker
+                        }
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Model for this run", style = MaterialTheme.typography.bodySmall, color = Color(0xFF666666))
+                        Text(
+                            text = effectiveBulkModel?.displayName ?: "No models downloaded",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = Color.White,
+                        )
+                    }
+                    if (downloadedModelInfos.isNotEmpty()) {
+                        Text(
+                            if (showBulkModelPicker) "Hide" else "Pick",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = Color(0xFF999999),
+                        )
+                    }
+                }
+
+                if (showBulkModelPicker && downloadedModelInfos.isNotEmpty()) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color(0xFF111111))
+                    ) {
+                        downloadedModelInfos.forEach { model ->
+                            val isSelected = model.id == effectiveBulkModelId
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        viewModel.selectBulkModel(model.id)
+                                        showBulkModelPicker = false
+                                    }
+                                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(14.dp)
+                                        .clip(CircleShape)
+                                        .background(if (isSelected) Color.White else Color(0xFF333333))
+                                )
+                                Spacer(Modifier.width(12.dp))
+                                Text(
+                                    text = model.displayName,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = if (isSelected) Color.White else Color(0xFFAAAAAA),
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Text(
+                                    text = "${model.sizeMb}MB · ${model.engine}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color(0xFF555555)
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // Action area
+                if (isBulkRunning) {
+                    Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+                        val p = bulkProgress
+                        if (p != null) {
+                            Text(
+                                "Transcribing ${p.current} / ${p.total}",
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = Color.White,
+                            )
+                            Text(
+                                p.contact.ifBlank { p.filename },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color(0xFF999999),
+                                maxLines = 1,
+                            )
+                            Spacer(Modifier.height(6.dp))
+                            LinearProgressIndicator(
+                                progress = { p.current.toFloat() / p.total.coerceAtLeast(1) },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(3.dp)
+                                    .clip(RoundedCornerShape(2.dp)),
+                                color = Color.White,
+                                trackColor = Color(0xFF333333),
+                            )
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                text = formatEta(p.etaMs, p.finishAtEpochMs),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color(0xFF999999),
+                            )
+                        } else {
+                            Text("Starting…", style = MaterialTheme.typography.bodyLarge, color = Color.White)
+                        }
+                        Spacer(Modifier.height(10.dp))
+                        BulkActionButton(
+                            label = "Stop",
+                            destructive = true,
+                            enabled = true,
+                            onClick = { viewModel.stopBulk() },
+                        )
+                    }
+                } else {
+                    Box(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+                        BulkActionButton(
+                            label = if (workCount > 0) "Start Bulk Transcribe ($workCount)" else "Nothing to transcribe",
+                            destructive = false,
+                            enabled = workCount > 0 && effectiveBulkModel != null,
+                            onClick = { viewModel.startBulk() },
+                        )
+                    }
+                }
+
+                SettingsRow(
+                    label = "Clear All Transcriptions",
+                    sublabel = "Reset every row to PENDING (preserves contact, duration, file links)",
+                    onClick = { showClearConfirm = true }
+                )
+            }
+
+            if (showClearConfirm) {
+                val totalRows = pendingCount + failedCount + completedCount
+                AlertDialog(
+                    onDismissRequest = { showClearConfirm = false },
+                    containerColor = Color(0xFF111111),
+                    titleContentColor = Color.White,
+                    textContentColor = Color(0xFFBBBBBB),
+                    title = { Text("Clear all transcriptions?") },
+                    text = {
+                        Text(
+                            "Resets $totalRows row${if (totalRows == 1) "" else "s"} to PENDING. " +
+                                "Contact names, durations, and file links are preserved. " +
+                                "Run Bulk Transcribe afterwards to re-process them."
+                        )
+                    },
+                    confirmButton = {
+                        TextButton(
+                            onClick = {
+                                viewModel.clearAllTranscriptions()
+                                showClearConfirm = false
+                            },
+                            colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFFFF6B6B))
+                        ) { Text("Clear") }
+                    },
+                    dismissButton = {
+                        TextButton(
+                            onClick = { showClearConfirm = false },
+                            colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFF999999))
+                        ) { Text("Cancel") }
+                    }
+                )
+            }
+
+            Spacer(Modifier.height(8.dp))
+
             // Test mode
             SettingsSection("Test") {
                 SettingsRow(
@@ -379,6 +575,71 @@ private fun SettingsRow(label: String, sublabel: String, onClick: () -> Unit) {
         Text(text = label, style = MaterialTheme.typography.bodyLarge, color = Color.White)
         Text(text = sublabel, style = MaterialTheme.typography.bodySmall, color = Color(0xFF666666))
     }
+}
+
+@Composable
+private fun BulkStatRow(label: String, count: Int, durationMs: Long?) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(label, style = MaterialTheme.typography.bodyLarge, color = Color(0xFFAAAAAA))
+        val durStr = durationMs?.takeIf { it > 0 }?.let { " · ${formatBulkDuration(it)}" } ?: ""
+        Text("$count$durStr", style = MaterialTheme.typography.bodyLarge, color = Color.White)
+    }
+}
+
+@Composable
+private fun BulkActionButton(
+    label: String,
+    destructive: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    val bg = when {
+        !enabled -> Color(0xFF1A1A1A)
+        destructive -> Color(0xFF2A1010)
+        else -> Color.White
+    }
+    val fg = when {
+        !enabled -> Color(0xFF666666)
+        destructive -> Color(0xFFFF6B6B)
+        else -> Color.Black
+    }
+    Text(
+        text = label,
+        style = MaterialTheme.typography.labelLarge,
+        color = fg,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(bg)
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(vertical = 12.dp),
+        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+    )
+}
+
+private fun formatBulkDuration(ms: Long): String {
+    val totalSec = ms / 1000
+    val h = totalSec / 3600
+    val m = (totalSec % 3600) / 60
+    val s = totalSec % 60
+    return when {
+        h > 0 -> "${h}h ${m}m"
+        m > 0 -> "${m}m"
+        else -> "${s}s"
+    }
+}
+
+private fun formatEta(etaMs: Long?, finishAtEpochMs: Long?): String {
+    if (etaMs == null || finishAtEpochMs == null) return "ETA: estimating…"
+    val finishStr = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
+        .format(java.util.Date(finishAtEpochMs))
+    return "ETA: ${formatBulkDuration(etaMs)} · done by $finishStr"
 }
 
 private fun isNotificationListenerEnabled(context: android.content.Context): Boolean {

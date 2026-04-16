@@ -50,6 +50,16 @@
                 tools:node="remove" />
         </provider>
 
+        <!--
+          Required on Android 14+: declare the foreground service type on
+          WorkManager's foreground service so BulkTranscribeWorker can call
+          setForeground() with FOREGROUND_SERVICE_TYPE_DATA_SYNC.
+        -->
+        <service
+            android:name="androidx.work.impl.foreground.SystemForegroundService"
+            android:foregroundServiceType="dataSync"
+            tools:node="merge" />
+
     </application>
 
 </manifest>

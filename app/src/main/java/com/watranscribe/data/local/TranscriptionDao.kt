@@ -1,11 +1,19 @@
 package com.watranscribe.data.local
 
+import androidx.room.ColumnInfo
 import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Update
 import kotlinx.coroutines.flow.Flow
+
+/** Aggregate row from [TranscriptionDao.observeStatusStats]. */
+data class StatusStat(
+    @ColumnInfo(name = "status") val status: TranscriptionStatus,
+    @ColumnInfo(name = "cnt") val count: Int,
+    @ColumnInfo(name = "dur") val durationMs: Long,
+)
 
 @Dao
 interface TranscriptionDao {
@@ -60,4 +68,20 @@ interface TranscriptionDao {
 
     @Query("SELECT COUNT(*) FROM transcriptions")
     suspend fun count(): Int
+
+    @Query(
+        "SELECT status AS status, COUNT(*) AS cnt, COALESCE(SUM(duration_ms), 0) AS dur " +
+        "FROM transcriptions GROUP BY status"
+    )
+    fun observeStatusStats(): Flow<List<StatusStat>>
+
+    @Query(
+        "SELECT * FROM transcriptions WHERE status IN ('PENDING', 'FAILED') ORDER BY last_modified DESC"
+    )
+    suspend fun getPendingAndFailed(): List<TranscriptionEntity>
+
+    @Query(
+        "UPDATE transcriptions SET transcription = NULL, segments_json = '', model_used = '', status = 'PENDING'"
+    )
+    suspend fun clearAllTranscriptions(): Int
 }

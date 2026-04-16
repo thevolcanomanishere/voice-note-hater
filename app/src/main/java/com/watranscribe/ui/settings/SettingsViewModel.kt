@@ -1,8 +1,15 @@
 package com.watranscribe.ui.settings
 
+import android.content.Context
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.work.ExistingWorkPolicy
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkInfo
+import androidx.work.WorkManager
+import androidx.work.workDataOf
+import com.watranscribe.data.local.TranscriptionStatus
 import com.watranscribe.data.repository.PreferencesRepository
 import com.watranscribe.data.repository.TranscriptionRepository
 import android.util.Log
@@ -10,15 +17,29 @@ import com.watranscribe.engine.ModelInfo
 import com.watranscribe.engine.ModelManager
 import com.watranscribe.engine.TranscriptionEngine
 import com.watranscribe.engine.TranscriptionNotifier
+import com.watranscribe.worker.BulkTranscribeWorker
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
+
+data class BulkProgress(
+    val current: Int,
+    val total: Int,
+    val filename: String,
+    val contact: String,
+    /** Estimated milliseconds remaining, or null while still warming up (no data yet). */
+    val etaMs: Long?,
+    /** Estimated wall-clock completion time as epoch ms, or null while warming up. */
+    val finishAtEpochMs: Long?,
+)
 
 @HiltViewModel
 class SettingsViewModel @Inject constructor(
@@ -26,7 +47,8 @@ class SettingsViewModel @Inject constructor(
     private val transcriptionRepo: TranscriptionRepository,
     private val notifier: TranscriptionNotifier,
     val modelManager: ModelManager,
-    private val engines: Map<String, @JvmSuppressWildcards TranscriptionEngine>
+    private val engines: Map<String, @JvmSuppressWildcards TranscriptionEngine>,
+    @ApplicationContext private val appContext: Context,
 ) : ViewModel() {
 
     val folderUri = prefsRepo.folderUri.stateIn(
@@ -51,6 +73,81 @@ class SettingsViewModel @Inject constructor(
 
     private val _storageUsed = MutableStateFlow(0L)
     val storageUsed: StateFlow<Long> = _storageUsed.asStateFlow()
+
+    // --- Bulk transcribe stats (live from Room) ---
+    private data class StatusBucket(val count: Int, val durationMs: Long)
+    private val statsFlow: StateFlow<Map<TranscriptionStatus, StatusBucket>> =
+        transcriptionRepo.observeStatusStats()
+            .map { rows -> rows.associate { it.status to StatusBucket(it.count, it.durationMs) } }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyMap())
+
+    val pendingCount: StateFlow<Int> = statsFlow
+        .map { it[TranscriptionStatus.PENDING]?.count ?: 0 }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+    val failedCount: StateFlow<Int> = statsFlow
+        .map { it[TranscriptionStatus.FAILED]?.count ?: 0 }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+    val completedCount: StateFlow<Int> = statsFlow
+        .map { it[TranscriptionStatus.COMPLETED]?.count ?: 0 }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+    val pendingDurationMs: StateFlow<Long> = statsFlow
+        .map { it[TranscriptionStatus.PENDING]?.durationMs ?: 0L }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0L)
+    val failedDurationMs: StateFlow<Long> = statsFlow
+        .map { it[TranscriptionStatus.FAILED]?.durationMs ?: 0L }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0L)
+
+    // --- Bulk model picker (in-memory only — does NOT mutate global pref) ---
+    private val _bulkModelId = MutableStateFlow<String?>(null)
+    val bulkModelId: StateFlow<String?> = _bulkModelId.asStateFlow()
+
+    fun selectBulkModel(id: String) { _bulkModelId.value = id }
+
+    // --- Bulk job state derived from WorkManager ---
+    private val workManager = WorkManager.getInstance(appContext)
+
+    private val bulkWorkInfo: StateFlow<WorkInfo?> = workManager
+        .getWorkInfosForUniqueWorkFlow(BulkTranscribeWorker.WORK_NAME)
+        .map { it.firstOrNull() }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
+    val isBulkRunning: StateFlow<Boolean> = bulkWorkInfo
+        .map { it?.state == WorkInfo.State.RUNNING || it?.state == WorkInfo.State.ENQUEUED }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+
+    val bulkProgress: StateFlow<BulkProgress?> = bulkWorkInfo
+        .map { wi ->
+            if (wi == null || wi.state != WorkInfo.State.RUNNING) return@map null
+            val p = wi.progress
+            val total = p.getInt(BulkTranscribeWorker.KEY_TOTAL, 0)
+            if (total == 0) return@map null
+            val current = p.getInt(BulkTranscribeWorker.KEY_CURRENT, 0)
+            val totalAudioMs = p.getLong(BulkTranscribeWorker.KEY_TOTAL_AUDIO_MS, 0L)
+            val processedAudioMs = p.getLong(BulkTranscribeWorker.KEY_PROCESSED_AUDIO_MS, 0L)
+            val processedWallMs = p.getLong(BulkTranscribeWorker.KEY_PROCESSED_WALL_MS, 0L)
+
+            // Compute ETA from per-file rate: rate = wall_ms / audio_ms (i.e. RTF + overhead).
+            // Need at least one completed file with non-zero audio to have a meaningful rate;
+            // otherwise leave eta null and the UI shows "estimating…".
+            val (etaMs, finishAt) = if (processedAudioMs > 0L && processedWallMs > 0L) {
+                val remainingAudioMs = (totalAudioMs - processedAudioMs).coerceAtLeast(0L)
+                val rate = processedWallMs.toDouble() / processedAudioMs.toDouble()
+                val eta = (remainingAudioMs * rate).toLong()
+                eta to (System.currentTimeMillis() + eta)
+            } else {
+                null to null
+            }
+
+            BulkProgress(
+                current = current,
+                total = total,
+                filename = p.getString(BulkTranscribeWorker.KEY_FILENAME).orEmpty(),
+                contact = p.getString(BulkTranscribeWorker.KEY_CONTACT).orEmpty(),
+                etaMs = etaMs,
+                finishAtEpochMs = finishAt,
+            )
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
     init {
         viewModelScope.launch {
@@ -104,6 +201,32 @@ class SettingsViewModel @Inject constructor(
 
     fun onBackgroundScanToggled(enabled: Boolean) {
         viewModelScope.launch { prefsRepo.setBackgroundScan(enabled) }
+    }
+
+    fun startBulk() {
+        val modelId = _bulkModelId.value ?: modelSize.value
+        Log.d("SettingsVM", "startBulk model=$modelId")
+        val req = OneTimeWorkRequestBuilder<BulkTranscribeWorker>()
+            .setInputData(workDataOf(BulkTranscribeWorker.KEY_MODEL_ID to modelId))
+            .build()
+        workManager.enqueueUniqueWork(
+            BulkTranscribeWorker.WORK_NAME,
+            ExistingWorkPolicy.KEEP,
+            req,
+        )
+    }
+
+    fun stopBulk() {
+        Log.d("SettingsVM", "stopBulk")
+        workManager.cancelUniqueWork(BulkTranscribeWorker.WORK_NAME)
+    }
+
+    fun clearAllTranscriptions() {
+        viewModelScope.launch {
+            val cleared = transcriptionRepo.clearAllTranscriptions()
+            _transcriptionCount.value = transcriptionRepo.count()
+            Log.d("SettingsVM", "Cleared $cleared transcriptions")
+        }
     }
 
     fun testNotification(type: String) {

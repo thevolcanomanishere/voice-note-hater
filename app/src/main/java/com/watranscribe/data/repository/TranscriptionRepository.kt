@@ -5,6 +5,7 @@ import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.provider.DocumentsContract
 import android.util.Log
+import com.watranscribe.data.local.StatusStat
 import com.watranscribe.data.local.TranscriptionDao
 import com.watranscribe.data.local.TranscriptionEntity
 import com.watranscribe.data.local.TranscriptionStatus
@@ -257,4 +258,12 @@ class TranscriptionRepository @Inject constructor(
     }
 
     suspend fun count(): Int = dao.count()
+
+    fun observeStatusStats(): Flow<List<StatusStat>> = dao.observeStatusStats()
+
+    suspend fun getPendingAndFailed(): List<TranscriptionEntity> = dao.getPendingAndFailed()
+
+    suspend fun clearAllTranscriptions(): Int = withContext(Dispatchers.IO) {
+        dao.clearAllTranscriptions()
+    }
 }
