@@ -17,8 +17,8 @@ set_target_properties(ggml PROPERTIES
 )
 
 target_include_directories(watranscribe-jni PRIVATE
-    /tmp/whisper.cpp/include
-    /tmp/whisper.cpp/ggml/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/whisper
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml
 )
 
 target_link_libraries(watranscribe-jni ${LOG_LIB} whisper ggml)
