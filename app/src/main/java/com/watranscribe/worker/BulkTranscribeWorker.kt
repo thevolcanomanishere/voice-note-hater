@@ -2,9 +2,14 @@ package com.watranscribe.worker
 
 import android.app.PendingIntent
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
+import android.os.BatteryManager
 import android.os.Build
+import android.os.PowerManager
 import android.util.Log
+import java.io.File
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.hilt.work.HiltWorker
@@ -20,6 +25,9 @@ import com.watranscribe.engine.TranscriptionNotifier
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 private const val TAG = "BulkTranscribe"
 
@@ -69,7 +77,8 @@ class BulkTranscribeWorker @AssistedInject constructor(
         val total = items.size
         val totalAudioMs = items.sumOf { safeDurationMs(it.durationMs) }
         val startedAt = System.currentTimeMillis()
-        Log.d(TAG, "Bulk: $total items, totalAudio=${totalAudioMs / 1000}s")
+        val filesWithNoDuration = items.count { it.durationMs == 0L }
+        Log.d(TAG, "Bulk: $total items, totalAudio=${totalAudioMs / 1000}s, zeroDuration=$filesWithNoDuration")
         if (total == 0) return Result.success()
 
         try {
@@ -78,47 +87,116 @@ class BulkTranscribeWorker @AssistedInject constructor(
             Log.w(TAG, "setForeground failed (notification permission?)", e)
         }
 
+        // Pre-warm the model so the first file doesn't pay load cost in its wall time.
+        // Without this, the ETA rate is inflated by model-load time in file #1, making
+        // ETA estimates too high for the whole run.
+        val warmStart = System.currentTimeMillis()
+        transcriptionRepo.preWarmModel(target)
+        val warmMs = System.currentTimeMillis() - warmStart
+        Log.d(TAG, "Bulk: model warm-up done in ${warmMs}ms")
+
         var processedAudioMs = 0L
         var processedWallMs = 0L
+        var successCount = 0
+        var failCount = 0
 
-        for ((i, entry) in items.withIndex()) {
-            if (isStopped) {
-                Log.d(TAG, "Bulk stopped by user at ${i}/$total")
-                break
+        // Shared state written by onSegment callback (JNI thread) and read by the ticker.
+        // Use AtomicReference/AtomicLong for safe cross-thread visibility without @Volatile
+        // (which only applies to fields, not local variables in Kotlin).
+        val currentLiveText = java.util.concurrent.atomic.AtomicReference("")
+        val currentFileStartedAt = java.util.concurrent.atomic.AtomicLong(0L)
+        val currentFilename = java.util.concurrent.atomic.AtomicReference("")
+        val currentContact = java.util.concurrent.atomic.AtomicReference("")
+        val currentIndex = java.util.concurrent.atomic.AtomicInteger(0)
+
+        // A ticker coroutine runs alongside the main loop, pushing setProgress every 600ms.
+        // This keeps the UI alive during long inferences — without it, nothing updates between
+        // the start-of-file setProgress and the next file's setProgress (can be 30-60s).
+        coroutineScope {
+            val tickerJob = launch {
+                while (true) {
+                    delay(600)
+                    setProgress(workDataOf(
+                        KEY_CURRENT to currentIndex.get(),
+                        KEY_TOTAL to total,
+                        KEY_FILENAME to currentFilename.get(),
+                        KEY_CONTACT to currentContact.get(),
+                        KEY_TOTAL_AUDIO_MS to totalAudioMs,
+                        KEY_PROCESSED_AUDIO_MS to processedAudioMs,
+                        KEY_PROCESSED_WALL_MS to processedWallMs,
+                        KEY_STARTED_AT to startedAt,
+                        KEY_FILE_STARTED_AT to currentFileStartedAt.get(),
+                        KEY_LIVE_TEXT to currentLiveText.get(),
+                        KEY_THERMAL to thermalStatus(),
+                        KEY_CPU_MHZ to cpuMaxMhz(),
+                        KEY_BATTERY_TEMP to batteryTempC(),
+                    ))
+                }
             }
-            val current = i + 1
-            val label = entry.contact.ifBlank { entry.filename }
 
-            try {
-                setForeground(buildForegroundInfo(current, total, label))
-            } catch (_: Exception) { /* keep going */ }
+            for ((i, entry) in items.withIndex()) {
+                if (isStopped) {
+                    Log.d(TAG, "Bulk stopped by user at ${i}/$total")
+                    break
+                }
+                val current = i + 1
+                currentIndex.set(current)
+                currentFilename.set(entry.filename)
+                currentContact.set(entry.contact)
+                currentLiveText.set("")
+                currentFileStartedAt.set(System.currentTimeMillis())
 
-            setProgress(workDataOf(
-                KEY_CURRENT to current,
-                KEY_TOTAL to total,
-                KEY_FILENAME to entry.filename,
-                KEY_CONTACT to entry.contact,
-                KEY_TOTAL_AUDIO_MS to totalAudioMs,
-                KEY_PROCESSED_AUDIO_MS to processedAudioMs,
-                KEY_PROCESSED_WALL_MS to processedWallMs,
-                KEY_STARTED_AT to startedAt,
-            ))
+                val label = entry.contact.ifBlank { entry.filename }
+                try {
+                    setForeground(buildForegroundInfo(current, total, label))
+                } catch (_: Exception) { /* keep going */ }
 
-            val fileStart = System.currentTimeMillis()
-            try {
-                transcriptionRepo.transcribe(entry, modelOverride = target)
-                processedAudioMs += safeDurationMs(entry.durationMs)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                // transcribe() already marks the row FAILED on exception; just log and continue.
-                // Don't credit failed-file audio toward the rate — it produced no useful work.
-                Log.e(TAG, "Bulk: failed ${entry.filename}", e)
+                // Emit immediately so the UI shows the new file before inference starts.
+                setProgress(workDataOf(
+                    KEY_CURRENT to current,
+                    KEY_TOTAL to total,
+                    KEY_FILENAME to entry.filename,
+                    KEY_CONTACT to entry.contact,
+                    KEY_TOTAL_AUDIO_MS to totalAudioMs,
+                    KEY_PROCESSED_AUDIO_MS to processedAudioMs,
+                    KEY_PROCESSED_WALL_MS to processedWallMs,
+                    KEY_STARTED_AT to startedAt,
+                    KEY_FILE_STARTED_AT to currentFileStartedAt.get(),
+                    KEY_LIVE_TEXT to "",
+                ))
+
+                Log.d(TAG, "Bulk[$current/$total] start: ${entry.filename} audio=${entry.durationMs}ms contact='${entry.contact}'")
+                val fileStart = System.currentTimeMillis()
+                val result = try {
+                    transcriptionRepo.transcribe(entry, modelOverride = target) { text ->
+                        currentLiveText.set(text)
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.e(TAG, "Bulk: failed ${entry.filename}", e)
+                    kotlin.Result.failure(e)
+                }
+                val fileWallMs = System.currentTimeMillis() - fileStart
+                val rtf = if (entry.durationMs > 0) fileWallMs.toDouble() / entry.durationMs else Double.NaN
+                if (result.isSuccess) {
+                    successCount++
+                    processedAudioMs += safeDurationMs(entry.durationMs)
+                    processedWallMs += fileWallMs
+                    Log.d(TAG, "Bulk[$current/$total] ok: wall=${fileWallMs}ms audio=${entry.durationMs}ms rtf=%.2fx".format(rtf))
+                } else {
+                    failCount++
+                    Log.w(TAG, "Bulk[$current/$total] fail: wall=${fileWallMs}ms ${entry.filename}")
+                }
             }
-            processedWallMs += System.currentTimeMillis() - fileStart
+
+            tickerJob.cancel()
         }
 
-        Log.d(TAG, "Bulk complete in ${(System.currentTimeMillis() - startedAt) / 1000}s")
+        val totalWallMs = System.currentTimeMillis() - startedAt
+        val aggRtf = if (processedAudioMs > 0) processedWallMs.toDouble() / processedAudioMs else Double.NaN
+        Log.d(TAG, "Bulk done: ${successCount}ok ${failCount}fail in ${totalWallMs / 1000}s " +
+            "(warm=${warmMs}ms, transcribeWall=${processedWallMs / 1000}s, audio=${processedAudioMs / 1000}s, aggRTF=%.2fx)".format(aggRtf))
         return Result.success()
     }
 
@@ -144,6 +222,29 @@ class BulkTranscribeWorker @AssistedInject constructor(
         }
     }
 
+    private fun thermalStatus(): Int {
+        if (Build.VERSION.SDK_INT < 29) return 0
+        val pm = applicationContext.getSystemService(Context.POWER_SERVICE) as PowerManager
+        return pm.currentThermalStatus
+    }
+
+    private fun cpuMaxMhz(): Int {
+        var max = 0; var cpu = 0
+        while (true) {
+            val f = File("/sys/devices/system/cpu/cpu$cpu/cpufreq/scaling_cur_freq")
+            if (!f.exists()) break
+            try { max = maxOf(max, f.readText().trim().toInt() / 1000) } catch (_: Exception) {}
+            cpu++
+        }
+        return max
+    }
+
+    private fun batteryTempC(): Float {
+        val intent = applicationContext.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+            ?: return 0f
+        return intent.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) / 10f
+    }
+
     companion object {
         const val WORK_NAME = "bulk_transcribe"
         const val NOTIF_ID = 9001
@@ -156,6 +257,11 @@ class BulkTranscribeWorker @AssistedInject constructor(
         const val KEY_PROCESSED_AUDIO_MS = "processed_audio_ms"
         const val KEY_PROCESSED_WALL_MS = "processed_wall_ms"
         const val KEY_STARTED_AT = "started_at"
+        const val KEY_FILE_STARTED_AT = "file_started_at"
+        const val KEY_LIVE_TEXT = "live_text"
+        const val KEY_THERMAL = "thermal"
+        const val KEY_CPU_MHZ = "cpu_mhz"
+        const val KEY_BATTERY_TEMP = "battery_temp"
         private const val MAX_REASONABLE_DURATION_MS = 21_600_000L // 6 hours
     }
 }

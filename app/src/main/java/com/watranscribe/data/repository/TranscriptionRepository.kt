@@ -567,6 +567,17 @@ class TranscriptionRepository @Inject constructor(
 
     suspend fun getPendingAndFailed(): List<TranscriptionEntity> = dao.getPendingAndFailed()
 
+    /** Pre-warm the engine for the given model so subsequent transcribe() calls don't pay load cost. */
+    suspend fun preWarmModel(model: ModelInfo) = withContext(Dispatchers.IO) {
+        val engine = engines[model.engine] ?: run {
+            Log.w(TAG, "preWarmModel: no engine for '${model.engine}'")
+            return@withContext
+        }
+        val t = System.currentTimeMillis()
+        engine.loadModel(model.filename)
+        Log.d(TAG, "PERF preWarm=${System.currentTimeMillis() - t}ms model=${model.id}")
+    }
+
     suspend fun clearAllTranscriptions(): Int = withContext(Dispatchers.IO) {
         dao.clearAllTranscriptions()
     }

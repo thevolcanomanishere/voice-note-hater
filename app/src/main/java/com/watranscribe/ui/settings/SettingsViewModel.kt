@@ -39,6 +39,19 @@ data class BulkProgress(
     val etaMs: Long?,
     /** Estimated wall-clock completion time as epoch ms, or null while warming up. */
     val finishAtEpochMs: Long?,
+    /** Audio processed so far in ms (files with known duration only). */
+    val processedAudioMs: Long,
+    /** Total audio in ms for all files in this run (files with known duration only). */
+    val totalAudioMs: Long,
+    /** Real-time factor: wall_ms / audio_ms. < 1.0 = faster than realtime. Null until first file. */
+    val rtf: Double?,
+    /** Epoch ms when the current file started (for elapsed-time display in the UI). */
+    val fileStartedAtMs: Long,
+    /** Partial transcription text streaming in from the current file. */
+    val liveText: String,
+    val thermalStatus: Int = 0,
+    val cpuMaxMhz: Int = 0,
+    val batteryTempC: Float = 0f,
 )
 
 @HiltViewModel
@@ -148,6 +161,16 @@ class SettingsViewModel @Inject constructor(
                 contact = p.getString(BulkTranscribeWorker.KEY_CONTACT).orEmpty(),
                 etaMs = etaMs,
                 finishAtEpochMs = finishAt,
+                processedAudioMs = processedAudioMs,
+                totalAudioMs = totalAudioMs,
+                rtf = if (processedAudioMs > 0L && processedWallMs > 0L)
+                    processedWallMs.toDouble() / processedAudioMs.toDouble()
+                else null,
+                fileStartedAtMs = p.getLong(BulkTranscribeWorker.KEY_FILE_STARTED_AT, 0L),
+                liveText = p.getString(BulkTranscribeWorker.KEY_LIVE_TEXT).orEmpty(),
+                thermalStatus = p.getInt(BulkTranscribeWorker.KEY_THERMAL, 0),
+                cpuMaxMhz = p.getInt(BulkTranscribeWorker.KEY_CPU_MHZ, 0),
+                batteryTempC = p.getFloat(BulkTranscribeWorker.KEY_BATTERY_TEMP, 0f),
             )
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
