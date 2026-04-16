@@ -1,10 +1,25 @@
+import org.gradle.testing.jacoco.tasks.JacocoCoverageVerification
+import org.gradle.testing.jacoco.tasks.JacocoReport
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
     id("com.google.devtools.ksp")
     id("com.google.dagger.hilt.android")
+    jacoco
 }
+
+val releaseStoreFile = System.getenv("ANDROID_SIGNING_STORE_FILE")
+val releaseStorePassword = System.getenv("ANDROID_SIGNING_STORE_PASSWORD")
+val releaseKeyAlias = System.getenv("ANDROID_SIGNING_KEY_ALIAS")
+val releaseKeyPassword = System.getenv("ANDROID_SIGNING_KEY_PASSWORD")
+val hasReleaseSigning = listOf(
+    releaseStoreFile,
+    releaseStorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+).all { !it.isNullOrBlank() }
 
 ksp {
     arg("room.schemaLocation", "$projectDir/schemas")
@@ -40,9 +55,23 @@ android {
         }
     }
 
+    signingConfigs {
+        create("release") {
+            if (hasReleaseSigning) {
+                storeFile = file(releaseStoreFile!!)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -61,6 +90,81 @@ android {
 
     buildFeatures {
         compose = true
+    }
+}
+
+jacoco {
+    toolVersion = "0.8.12"
+}
+
+tasks.register<JacocoReport>("jacocoTestReport") {
+    dependsOn("testDebugUnitTest")
+
+    reports {
+        xml.required.set(true)
+        html.required.set(true)
+        csv.required.set(false)
+    }
+
+    val excludes = listOf(
+        "**/R.class",
+        "**/R$*.class",
+        "**/BuildConfig.*",
+        "**/Manifest*.*",
+        "**/*Test*.*",
+        "**/*\$Companion*.*",
+        "**/*\$Lambda\$*.*",
+        "**/*\$inlined\$*.*",
+        "**/*_Factory*.*",
+        "**/*_Provide*Factory*.*",
+        "**/*Dagger*.*",
+        "**/*Hilt*.*",
+        "**/*MembersInjector*.*",
+        "**/*Module*.*",
+        "**/*Dao_Impl*.*",
+    )
+    val coverageIncludes = listOf(
+        "com/watranscribe/data/local/TimedSegment*",
+        "com/watranscribe/data/local/TranscriptionEntity*",
+        "com/watranscribe/data/local/TranscriptionStatus*",
+        "com/watranscribe/engine/PendingContactMatch*",
+    )
+
+    val buildDirPath = layout.buildDirectory.get().asFile
+
+    val kotlinClasses = fileTree("$buildDirPath/tmp/kotlin-classes/debug") {
+        include(coverageIncludes)
+        exclude(excludes)
+    }
+    val javaClasses = fileTree("$buildDirPath/intermediates/javac/debug") {
+        include(coverageIncludes)
+        exclude(excludes)
+    }
+
+    classDirectories.setFrom(files(kotlinClasses, javaClasses))
+    sourceDirectories.setFrom(files("src/main/java", "src/main/kotlin"))
+    executionData.setFrom(files("$buildDirPath/jacoco/testDebugUnitTest.exec"))
+}
+
+tasks.register<JacocoCoverageVerification>("jacocoTestCoverageVerification") {
+    dependsOn("jacocoTestReport")
+
+    val minCoverage = (project.findProperty("minCoverage") as String?)?.toBigDecimalOrNull()
+        ?: "0.70".toBigDecimal()
+
+    classDirectories.setFrom(tasks.named("jacocoTestReport", JacocoReport::class.java).map { it.classDirectories })
+    sourceDirectories.setFrom(tasks.named("jacocoTestReport", JacocoReport::class.java).map { it.sourceDirectories })
+    executionData.setFrom(tasks.named("jacocoTestReport", JacocoReport::class.java).map { it.executionData })
+
+    violationRules {
+        rule {
+            element = "BUNDLE"
+            limit {
+                counter = "LINE"
+                value = "COVEREDRATIO"
+                minimum = minCoverage
+            }
+        }
     }
 }
 

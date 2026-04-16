@@ -1,0 +1,99 @@
+name: Android APK Release
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-apk-release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK components
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "cmake;3.22.1" "ndk;27.2.12479018"
+
+      - name: Make Gradle wrapper executable
+        run: chmod +x ./gradlew
+
+      - name: Decode signing keystore
+        env:
+          ANDROID_SIGNING_KEYSTORE_B64: ${{ secrets.ANDROID_SIGNING_KEYSTORE_B64 }}
+        run: |
+          if [ -z "$ANDROID_SIGNING_KEYSTORE_B64" ]; then
+            echo "Missing ANDROID_SIGNING_KEYSTORE_B64 secret"
+            exit 1
+          fi
+          echo "$ANDROID_SIGNING_KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/release-keystore.jks"
+
+      - name: Run tests, coverage gate, and build signed release APK
+        env:
+          ANDROID_SIGNING_STORE_FILE: ${{ runner.temp }}/release-keystore.jks
+          ANDROID_SIGNING_STORE_PASSWORD: ${{ secrets.ANDROID_SIGNING_STORE_PASSWORD }}
+          ANDROID_SIGNING_KEY_ALIAS: ${{ secrets.ANDROID_SIGNING_KEY_ALIAS }}
+          ANDROID_SIGNING_KEY_PASSWORD: ${{ secrets.ANDROID_SIGNING_KEY_PASSWORD }}
+        run: ./gradlew testDebugUnitTest jacocoTestReport jacocoTestCoverageVerification assembleRelease -PminCoverage=0.70
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-apk
+          path: app/build/outputs/apk/release/app-release.apk
+
+      - name: Upload coverage report artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-report
+          path: app/build/reports/jacoco/jacocoTestReport/html
+
+      - name: Generate release metadata
+        id: meta
+        run: |
+          short_sha="${GITHUB_SHA::7}"
+          timestamp="$(date -u +'%Y%m%d-%H%M%S')"
+          tag="apk-${timestamp}-${short_sha}"
+          title="Android APK ${timestamp} (${short_sha})"
+
+          {
+            echo "tag=${tag}"
+            echo "title=${title}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release with APK
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.title }}
+          generate_release_notes: true
+          body: |
+            Automated APK release from `${{ github.ref_name }}`.
+
+            - Commit: `${{ github.sha }}`
+            - Triggered by: `${{ github.actor }}`
+            - Compare: https://github.com/${{ github.repository }}/compare/${{ github.event.before }}...${{ github.sha }}
+          files: |
+            app/build/outputs/apk/release/app-release.apk
