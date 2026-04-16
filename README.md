@@ -1,11 +1,14 @@
 # Voice Note Hater
 
-Because nobody has time to listen.
+Because nobody has time to listen, or open WhatsApp just to read one voice note.
 
-An Android app that transcribes WhatsApp voice notes locally on your device. No cloud. No account. No internet required.
+An Android app that auto-transcribes WhatsApp voice messages locally and shows the transcript in notifications, so you can read the message without opening WhatsApp. No cloud. No account. No internet required.
 
 ## What it does
 
+- Auto-transcribes new WhatsApp voice messages in the background and posts transcript notifications
+- Lets you read incoming voice notes from the notification shade without opening WhatsApp
+- Fixes the Android WhatsApp limitation where transcription is manual per-message instead of automatic
 - Transcribes WhatsApp voice notes using two on-device engines: [whisper.cpp](https://github.com/ggerganov/whisper.cpp) and [Moonshine](https://github.com/usefulsensors/moonshine) (via the official `ai.moonshine:moonshine-voice` Android SDK)
 - Auto-detects new incoming voice notes via a `NotificationListenerService` and transcribes them in the background
 - Identifies who sent each voice note from WhatsApp notifications (DMs and groups)
@@ -33,6 +36,7 @@ An Android app that transcribes WhatsApp voice notes locally on your device. No 
 
 **Auto-transcribe**
 - `NotificationListenerService` catches WhatsApp voice-message posts, extracts sender (or "Sender @ Group" for groups), and fires a one-shot `QuickTranscribeWorker` via WorkManager
+- When transcription finishes, the app posts a notification with the transcript text, so you can read it immediately from the shade
 - On bind, the listener replays any WhatsApp notifications already in the tray (Android doesn't do this automatically after the OS kills the app)
 - Optional 15-minute backup scan catches anything the listener missed because the OS froze our process — can be toggled off in Settings
 - Both paths post progress + completion notifications
@@ -115,7 +119,7 @@ Speed figures are indicative — measured on a Pixel-class device. Run the built
 1. **First launch** — grant folder access to WhatsApp Voice Notes via Android's folder picker. Grant notification access so the listener can detect new voice notes. If you're on OnePlus / Oppo / Xiaomi, tap the "Allow background activity" row in Settings to whitelist the app from battery optimization — otherwise the OS will freeze the listener.
 2. **Scan** — indexes `.opus` files from WhatsApp's `YYYYWW/PTT-YYYYMMDD-WANNNN.opus` structure via ContentResolver.
 3. **Transcribe** — decodes opus → PCM → 16 kHz mono float, routes to the selected engine (`WhisperEngine` or `MoonshineEngine`) via the common `TranscriptionEngine` interface.
-4. **Auto-detect** — `WhatsAppNotificationListener` catches voice-message notifications, extracts sender, triggers `QuickTranscribeWorker`. Transcription completes with a notification showing the text.
+4. **Auto-detect** — `WhatsAppNotificationListener` catches voice-message notifications, extracts sender, and triggers `QuickTranscribeWorker`. Transcription completes with a notification showing the text so you usually don't need to open WhatsApp at all.
 5. **Results** — stored in Room with JSON `segments_json` (start/end/text per line, optional word array) and the model name. Playback highlights at word granularity for whisper, line granularity for Moonshine.
 
 ## Architecture notes
