@@ -78,7 +78,8 @@ class SettingsViewModel @Inject constructor(
     @ApplicationContext private val appContext: Context,
 ) : ViewModel() {
 
-    val currentVersion: String = updateChecker.currentVersion
+    val currentVersion: String =
+        "${updateChecker.currentVersion} (${updateChecker.currentSha})"
 
     private val _updateState = MutableStateFlow<UpdateUiState>(UpdateUiState.Idle)
     val updateState: StateFlow<UpdateUiState> = _updateState.asStateFlow()
@@ -302,8 +303,7 @@ class SettingsViewModel @Inject constructor(
                 val release = updateChecker.fetchLatestRelease()
                 when {
                     release == null -> UpdateUiState.UpToDate(currentVersion)
-                    updateChecker.isNewer(release.versionName, currentVersion) > 0 ->
-                        UpdateUiState.Available(release)
+                    updateChecker.isNewer(release) -> UpdateUiState.Available(release)
                     else -> UpdateUiState.UpToDate(currentVersion)
                 }
             } catch (t: Throwable) {

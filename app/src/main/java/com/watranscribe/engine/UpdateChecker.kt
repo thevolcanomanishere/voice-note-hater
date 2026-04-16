@@ -19,8 +19,7 @@ import javax.inject.Singleton
 
 data class ReleaseInfo(
     val tagName: String,
-    val versionName: String,
-    val name: String,
+    val displayName: String,
     val body: String,
     val apkUrl: String,
     val apkSize: Long,
@@ -30,9 +29,11 @@ data class ReleaseInfo(
 /**
  * Checks GitHub releases for new APK builds and installs them in-app.
  *
- * Expects each release to attach an `.apk` asset. Version comparison is a
- * dot-separated integer compare with a `v` prefix stripped — e.g. `v1.2.3`
- * beats `1.2` because `[1,2,3] > [1,2]`.
+ * Our CI tags every release as `apk-{timestamp}-{shortsha}` (see
+ * .github/workflows/android-apk-release.yml). The `versionName` in gradle
+ * is hand-bumped and identical across many releases, so we identify "what
+ * you're running" by the 7-char git SHA baked into BuildConfig, and consider
+ * a release "newer" iff its tag doesn't contain that SHA.
  */
 @Singleton
 class UpdateChecker @Inject constructor(
@@ -45,6 +46,7 @@ class UpdateChecker @Inject constructor(
     }
 
     val currentVersion: String = BuildConfig.VERSION_NAME
+    val currentSha: String = BuildConfig.GIT_SHA
 
     suspend fun fetchLatestRelease(): ReleaseInfo? = withContext(Dispatchers.IO) {
         val conn = (URL(RELEASES_URL).openConnection() as HttpURLConnection).apply {
@@ -87,8 +89,7 @@ class UpdateChecker @Inject constructor(
         }
         return ReleaseInfo(
             tagName = tag,
-            versionName = tag.removePrefix("v").removePrefix("V"),
-            name = obj.optString("name").ifBlank { tag },
+            displayName = obj.optString("name").ifBlank { tag },
             body = obj.optString("body"),
             apkUrl = apkUrl,
             apkSize = apkSize,
@@ -96,16 +97,15 @@ class UpdateChecker @Inject constructor(
         )
     }
 
-    fun isNewer(remote: String, local: String): Int {
-        val r = remote.split(".", "-").mapNotNull { it.toIntOrNull() }
-        val l = local.split(".", "-").mapNotNull { it.toIntOrNull() }
-        val n = maxOf(r.size, l.size)
-        for (i in 0 until n) {
-            val a = r.getOrElse(i) { 0 }
-            val b = l.getOrElse(i) { 0 }
-            if (a != b) return a.compareTo(b)
-        }
-        return 0
+    /**
+     * True iff [release] looks newer than what we're running. Matches on the
+     * 7-char git SHA embedded in the release tag. Unknown / dev builds
+     * (where [currentSha] is "dev") always treat any release as newer so the
+     * user can move from an unsigned dev build to a signed release.
+     */
+    fun isNewer(release: ReleaseInfo): Boolean {
+        if (currentSha.isBlank() || currentSha == "dev") return true
+        return !release.tagName.contains(currentSha, ignoreCase = true)
     }
 
     suspend fun downloadApk(

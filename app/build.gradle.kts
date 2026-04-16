@@ -21,6 +21,22 @@ val hasReleaseSigning = listOf(
     releaseKeyPassword,
 ).all { !it.isNullOrBlank() }
 
+// Seven-char commit SHA for this build. Used at runtime by UpdateChecker to
+// match against the SHA embedded in our CI release tags (apk-{timestamp}-{sha}).
+// Falls back to "dev" for local builds without git (e.g. a source-only zip).
+val gitShortSha: String = run {
+    System.getenv("GITHUB_SHA")?.takeIf { it.length >= 7 }?.take(7)
+        ?: runCatching {
+            val proc = ProcessBuilder("git", "rev-parse", "--short=7", "HEAD")
+                .directory(rootDir)
+                .redirectErrorStream(true)
+                .start()
+            proc.inputStream.bufferedReader().readText().trim()
+                .takeIf { it.isNotEmpty() && proc.waitFor() == 0 }
+        }.getOrNull()
+        ?: "dev"
+}
+
 ksp {
     arg("room.schemaLocation", "$projectDir/schemas")
 }
@@ -35,6 +51,8 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "1.0"
+
+        buildConfigField("String", "GIT_SHA", "\"$gitShortSha\"")
 
         ndk {
             abiFilters += listOf("arm64-v8a")

@@ -722,7 +722,7 @@ private fun UpdatesSection(
                 )
             }
             is UpdateUiState.Available -> UpdateDetails(
-                title = "Update available: ${state.release.tagName}",
+                title = "Update available: ${state.release.displayName}",
                 body = state.release.body,
                 primaryLabel = "Download (${formatBytes(state.release.apkSize)})",
                 onPrimary = onDownload,
@@ -732,7 +732,7 @@ private fun UpdatesSection(
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
             ) {
                 Text(
-                    "Downloading ${state.release.tagName} · ${(state.progress * 100).toInt()}%",
+                    "Downloading ${state.release.displayName} · ${(state.progress * 100).toInt()}%",
                     style = MaterialTheme.typography.bodyMedium,
                     color = Color.White,
                 )
@@ -748,7 +748,7 @@ private fun UpdatesSection(
                 )
             }
             is UpdateUiState.Downloaded -> UpdateDetails(
-                title = "Ready to install: ${state.release.tagName}",
+                title = "Ready to install: ${state.release.displayName}",
                 body = "Tap install to apply the update. Android will ask you to confirm.",
                 primaryLabel = "Install",
                 onPrimary = onInstall,
