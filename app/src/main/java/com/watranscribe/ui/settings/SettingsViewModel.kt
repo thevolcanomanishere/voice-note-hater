@@ -15,9 +15,12 @@ import com.watranscribe.data.repository.TranscriptionRepository
 import android.util.Log
 import com.watranscribe.engine.ModelInfo
 import com.watranscribe.engine.ModelManager
+import com.watranscribe.engine.ReleaseInfo
 import com.watranscribe.engine.TranscriptionEngine
 import com.watranscribe.engine.TranscriptionNotifier
+import com.watranscribe.engine.UpdateChecker
 import com.watranscribe.worker.BulkTranscribeWorker
+import java.io.File
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.delay
@@ -29,6 +32,16 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
+
+sealed class UpdateUiState {
+    object Idle : UpdateUiState()
+    object Checking : UpdateUiState()
+    data class UpToDate(val currentVersion: String) : UpdateUiState()
+    data class Available(val release: ReleaseInfo) : UpdateUiState()
+    data class Downloading(val release: ReleaseInfo, val progress: Float) : UpdateUiState()
+    data class Downloaded(val release: ReleaseInfo, val apk: File) : UpdateUiState()
+    data class Error(val message: String) : UpdateUiState()
+}
 
 data class BulkProgress(
     val current: Int,
@@ -60,9 +73,16 @@ class SettingsViewModel @Inject constructor(
     private val transcriptionRepo: TranscriptionRepository,
     private val notifier: TranscriptionNotifier,
     val modelManager: ModelManager,
+    private val updateChecker: UpdateChecker,
     private val engines: Map<String, @JvmSuppressWildcards TranscriptionEngine>,
     @ApplicationContext private val appContext: Context,
 ) : ViewModel() {
+
+    val currentVersion: String =
+        "${updateChecker.currentVersion} (${updateChecker.currentSha})"
+
+    private val _updateState = MutableStateFlow<UpdateUiState>(UpdateUiState.Idle)
+    val updateState: StateFlow<UpdateUiState> = _updateState.asStateFlow()
 
     val folderUri = prefsRepo.folderUri.stateIn(
         viewModelScope, SharingStarted.WhileSubscribed(5000), null
@@ -274,6 +294,56 @@ class SettingsViewModel @Inject constructor(
             _transcriptionCount.value = transcriptionRepo.count()
             Log.d("SettingsVM", "Cleared $cleared transcriptions")
         }
+    }
+
+    fun checkForUpdate() {
+        viewModelScope.launch {
+            _updateState.value = UpdateUiState.Checking
+            _updateState.value = try {
+                val release = updateChecker.fetchLatestRelease()
+                when {
+                    release == null -> UpdateUiState.UpToDate(currentVersion)
+                    updateChecker.isNewer(release) -> UpdateUiState.Available(release)
+                    else -> UpdateUiState.UpToDate(currentVersion)
+                }
+            } catch (t: Throwable) {
+                Log.e("SettingsVM", "Update check failed", t)
+                UpdateUiState.Error(t.message ?: "Check failed")
+            }
+        }
+    }
+
+    fun downloadUpdate() {
+        val release = when (val s = _updateState.value) {
+            is UpdateUiState.Available -> s.release
+            is UpdateUiState.Error -> return
+            else -> return
+        }
+        viewModelScope.launch {
+            _updateState.value = UpdateUiState.Downloading(release, 0f)
+            _updateState.value = try {
+                val apk = updateChecker.downloadApk(release) { frac ->
+                    _updateState.value = UpdateUiState.Downloading(release, frac)
+                }
+                UpdateUiState.Downloaded(release, apk)
+            } catch (t: Throwable) {
+                Log.e("SettingsVM", "Update download failed", t)
+                UpdateUiState.Error(t.message ?: "Download failed")
+            }
+        }
+    }
+
+    fun installUpdate() {
+        val state = _updateState.value as? UpdateUiState.Downloaded ?: return
+        if (!updateChecker.canRequestInstall()) {
+            updateChecker.openInstallPermissionSettings()
+            return
+        }
+        updateChecker.launchInstall(state.apk)
+    }
+
+    fun dismissUpdate() {
+        _updateState.value = UpdateUiState.Idle
     }
 
     fun testNotification(type: String) {

@@ -117,6 +117,19 @@ fun SettingsScreen(
                 Spacer(Modifier.height(8.dp))
             }
 
+            // Updates
+            val updateState by viewModel.updateState.collectAsState()
+            UpdatesSection(
+                currentVersion = viewModel.currentVersion,
+                state = updateState,
+                onCheck = viewModel::checkForUpdate,
+                onDownload = viewModel::downloadUpdate,
+                onInstall = viewModel::installUpdate,
+                onDismiss = viewModel::dismissUpdate,
+            )
+
+            Spacer(Modifier.height(8.dp))
+
             // Watched folder
             SettingsSection("Watched Folder") {
                 SettingsRow(
@@ -658,6 +671,158 @@ fun SettingsScreen(
             }
         }
     }
+}
+
+@Composable
+private fun UpdatesSection(
+    currentVersion: String,
+    state: UpdateUiState,
+    onCheck: () -> Unit,
+    onDownload: () -> Unit,
+    onInstall: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    SettingsSection("Updates") {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Installed version", style = MaterialTheme.typography.bodySmall, color = Color(0xFF666666))
+                Text(currentVersion, style = MaterialTheme.typography.bodyLarge, color = Color.White)
+            }
+            val (label, enabled) = when (state) {
+                is UpdateUiState.Checking -> "Checking…" to false
+                is UpdateUiState.Downloading -> "Downloading…" to false
+                else -> "Check" to true
+            }
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelMedium,
+                color = if (enabled) Color.White else Color(0xFF666666),
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(if (enabled) Color(0xFF1A1A1A) else Color.Transparent)
+                    .clickable(enabled = enabled, onClick = onCheck)
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+            )
+        }
+
+        when (state) {
+            is UpdateUiState.Idle, is UpdateUiState.Checking -> {}
+            is UpdateUiState.UpToDate -> {
+                Text(
+                    "You're on the latest version.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFF4CAF50),
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                )
+            }
+            is UpdateUiState.Available -> UpdateDetails(
+                title = "Update available: ${state.release.displayName}",
+                body = state.release.body,
+                primaryLabel = "Download (${formatBytes(state.release.apkSize)})",
+                onPrimary = onDownload,
+                onDismiss = onDismiss,
+            )
+            is UpdateUiState.Downloading -> Column(
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+            ) {
+                Text(
+                    "Downloading ${state.release.displayName} · ${(state.progress * 100).toInt()}%",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Color.White,
+                )
+                Spacer(Modifier.height(8.dp))
+                LinearProgressIndicator(
+                    progress = { state.progress },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(3.dp)
+                        .clip(RoundedCornerShape(2.dp)),
+                    color = Color.White,
+                    trackColor = Color(0xFF333333),
+                )
+            }
+            is UpdateUiState.Downloaded -> UpdateDetails(
+                title = "Ready to install: ${state.release.displayName}",
+                body = "Tap install to apply the update. Android will ask you to confirm.",
+                primaryLabel = "Install",
+                onPrimary = onInstall,
+                onDismiss = onDismiss,
+            )
+            is UpdateUiState.Error -> Column(
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+            ) {
+                Text(
+                    "Update failed",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Color(0xFFFF6B6B),
+                )
+                Text(
+                    state.message,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFF999999),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun UpdateDetails(
+    title: String,
+    body: String,
+    primaryLabel: String,
+    onPrimary: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+        Text(title, style = MaterialTheme.typography.bodyLarge, color = Color.White)
+        if (body.isNotBlank()) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                body,
+                style = MaterialTheme.typography.bodySmall,
+                color = Color(0xFF999999),
+                maxLines = 8,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            )
+        }
+        Spacer(Modifier.height(10.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                primaryLabel,
+                style = MaterialTheme.typography.labelLarge,
+                color = Color.Black,
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color.White)
+                    .clickable(onClick = onPrimary)
+                    .padding(vertical = 10.dp),
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            )
+            Text(
+                "Dismiss",
+                style = MaterialTheme.typography.labelLarge,
+                color = Color(0xFF999999),
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable(onClick = onDismiss)
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+            )
+        }
+    }
+}
+
+private fun formatBytes(bytes: Long): String {
+    if (bytes <= 0L) return "?"
+    val mb = bytes / 1024.0 / 1024.0
+    return "%.1f MB".format(mb)
 }
 
 @Composable
