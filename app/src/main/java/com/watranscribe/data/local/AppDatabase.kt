@@ -29,6 +29,7 @@ abstract class AppDatabase : RoomDatabase() {
             override fun migrate(db: SupportSQLiteDatabase) {
                 // Sanitize obviously invalid durations to keep ETA/stats realistic.
                 db.execSQL("UPDATE transcriptions SET duration_ms = 0 WHERE duration_ms < 0 OR duration_ms > 7200000")
+                db.execSQL("UPDATE transcriptions SET status = 'PENDING' WHERE status = 'IN_PROGRESS'")
             }
         }
     }
