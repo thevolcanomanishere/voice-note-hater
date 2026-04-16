@@ -25,9 +25,35 @@ private const val WHATSAPP_PKG = "com.whatsapp"
  */
 class WhatsAppNotificationListener : NotificationListenerService() {
 
-    override fun onNotificationPosted(sbn: StatusBarNotification) {
-        if (sbn.packageName != WHATSAPP_PKG) return
+    override fun onListenerConnected() {
+        super.onListenerConnected()
+        Log.i(TAG, "onListenerConnected — replaying active WhatsApp notifications")
+        // Android doesn't auto-replay existing notifications to a freshly bound
+        // listener (e.g. after app restart) — so we pull current ones ourselves.
+        val active = try {
+            activeNotifications
+        } catch (t: Throwable) {
+            Log.e(TAG, "activeNotifications threw", t)
+            return
+        }
+        Log.d(TAG, "onListenerConnected: ${active.size} active notifications total")
+        for (sbn in active) {
+            if (sbn.packageName == WHATSAPP_PKG) {
+                Log.d(TAG, "  replaying active WA notif id=${sbn.id} tag=${sbn.tag}")
+                handleNotification(sbn)
+            }
+        }
+    }
 
+    override fun onNotificationPosted(sbn: StatusBarNotification) {
+        // Log every post to confirm the listener is alive and receiving events.
+        // Filter to just watching WhatsApp after that.
+        Log.v(TAG, "onNotificationPosted pkg=${sbn.packageName} id=${sbn.id}")
+        if (sbn.packageName != WHATSAPP_PKG) return
+        handleNotification(sbn)
+    }
+
+    private fun handleNotification(sbn: StatusBarNotification) {
         val extras = sbn.notification.extras ?: return
         val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString() ?: return
         val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString() ?: ""
