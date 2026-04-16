@@ -21,9 +21,9 @@ val hasReleaseSigning = listOf(
     releaseKeyPassword,
 ).all { !it.isNullOrBlank() }
 
-// Seven-char commit SHA for this build. Used at runtime by UpdateChecker to
-// match against the SHA embedded in our CI release tags (apk-{timestamp}-{sha}).
-// Falls back to "dev" for local builds without git (e.g. a source-only zip).
+// Seven-char commit SHA for this build. Used at runtime by UpdateChecker for
+// display and to mark dev/unreleased builds. Falls back to "dev" for local
+// builds without git (e.g. a source-only zip).
 val gitShortSha: String = run {
     System.getenv("GITHUB_SHA")?.takeIf { it.length >= 7 }?.take(7)
         ?: runCatching {
@@ -37,6 +37,24 @@ val gitShortSha: String = run {
         ?: "dev"
 }
 
+// Semver pieces. MAJOR and MINOR are hand-bumped via version.properties at the
+// repo root. PATCH auto-increments per release in CI (passed via -PversionPatch).
+// Local builds produce "MAJOR.MINOR.0-dev" with versionCode 1 so the apk is
+// installable but never conflicts with a real release.
+val versionProps: java.util.Properties = java.util.Properties().apply {
+    rootProject.file("version.properties").inputStream().use { load(it) }
+}
+val semverMajor: Int = versionProps.getProperty("MAJOR").trim().toInt()
+val semverMinor: Int = versionProps.getProperty("MINOR").trim().toInt()
+val semverPatch: Int? = (project.findProperty("versionPatch") as String?)?.toIntOrNull()
+val resolvedVersionName: String = if (semverPatch != null) {
+    "$semverMajor.$semverMinor.$semverPatch"
+} else {
+    "$semverMajor.$semverMinor.0-dev"
+}
+val resolvedVersionCode: Int =
+    (project.findProperty("versionCode") as String?)?.toIntOrNull() ?: 1
+
 ksp {
     arg("room.schemaLocation", "$projectDir/schemas")
 }
@@ -49,8 +67,8 @@ android {
         applicationId = "com.watranscribe"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = resolvedVersionCode
+        versionName = resolvedVersionName
 
         buildConfigField("String", "GIT_SHA", "\"$gitShortSha\"")
 

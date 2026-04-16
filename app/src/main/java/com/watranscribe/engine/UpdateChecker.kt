@@ -19,6 +19,7 @@ import javax.inject.Singleton
 
 data class ReleaseInfo(
     val tagName: String,
+    val versionName: String,
     val displayName: String,
     val body: String,
     val apkUrl: String,
@@ -29,11 +30,10 @@ data class ReleaseInfo(
 /**
  * Checks GitHub releases for new APK builds and installs them in-app.
  *
- * Our CI tags every release as `apk-{timestamp}-{shortsha}` (see
- * .github/workflows/android-apk-release.yml). The `versionName` in gradle
- * is hand-bumped and identical across many releases, so we identify "what
- * you're running" by the 7-char git SHA baked into BuildConfig, and consider
- * a release "newer" iff its tag doesn't contain that SHA.
+ * Our CI tags every release as `vMAJOR.MINOR.PATCH` and builds the APK with
+ * the matching `BuildConfig.VERSION_NAME`, so we compare semver numerically.
+ * Dev builds (SHA == "dev", versionName ending in "-dev") treat any release
+ * as newer so the developer can switch to a signed release.
  */
 @Singleton
 class UpdateChecker @Inject constructor(
@@ -89,6 +89,7 @@ class UpdateChecker @Inject constructor(
         }
         return ReleaseInfo(
             tagName = tag,
+            versionName = tag.removePrefix("v").removePrefix("V"),
             displayName = obj.optString("name").ifBlank { tag },
             body = obj.optString("body"),
             apkUrl = apkUrl,
@@ -98,14 +99,26 @@ class UpdateChecker @Inject constructor(
     }
 
     /**
-     * True iff [release] looks newer than what we're running. Matches on the
-     * 7-char git SHA embedded in the release tag. Unknown / dev builds
-     * (where [currentSha] is "dev") always treat any release as newer so the
-     * user can move from an unsigned dev build to a signed release.
+     * True iff [release] is strictly newer than what we're running. Dev builds
+     * always see any release as newer so the developer can switch to a signed
+     * release. Otherwise compares semver numerically (ignoring non-numeric
+     * suffixes like "-dev" or "-rc1").
      */
     fun isNewer(release: ReleaseInfo): Boolean {
-        if (currentSha.isBlank() || currentSha == "dev") return true
-        return !release.tagName.contains(currentSha, ignoreCase = true)
+        if (currentSha == "dev" || currentVersion.endsWith("-dev")) return true
+        return compareSemver(release.versionName, currentVersion) > 0
+    }
+
+    private fun compareSemver(a: String, b: String): Int {
+        val av = a.split(".", "-").mapNotNull { it.toIntOrNull() }
+        val bv = b.split(".", "-").mapNotNull { it.toIntOrNull() }
+        val n = maxOf(av.size, bv.size)
+        for (i in 0 until n) {
+            val x = av.getOrElse(i) { 0 }
+            val y = bv.getOrElse(i) { 0 }
+            if (x != y) return x.compareTo(y)
+        }
+        return 0
     }
 
     suspend fun downloadApk(

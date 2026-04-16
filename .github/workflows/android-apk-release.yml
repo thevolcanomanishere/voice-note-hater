@@ -13,6 +13,7 @@ on:
       - build.gradle.kts
       - settings.gradle.kts
       - gradle.properties
+      - version.properties
   workflow_dispatch:
 
 permissions:
@@ -48,6 +49,36 @@ jobs:
       - name: Make Gradle wrapper executable
         run: chmod +x ./gradlew
 
+      - name: Compute semver
+        id: semver
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1091
+          source version.properties
+          git fetch --tags --quiet
+          # Next patch = max existing patch for v${MAJOR}.${MINOR}.* + 1 (or 0 if none).
+          latest_patch="$(git tag --list "v${MAJOR}.${MINOR}.*" \
+            | sed -E "s/^v${MAJOR}\\.${MINOR}\\.([0-9]+)$/\\1/" \
+            | grep -E '^[0-9]+$' \
+            | sort -n \
+            | tail -1 || true)"
+          if [ -z "$latest_patch" ]; then
+            patch=0
+          else
+            patch=$((latest_patch + 1))
+          fi
+          version_name="${MAJOR}.${MINOR}.${patch}"
+          # versionCode must strictly increase across releases; github.run_number
+          # is monotonic per workflow and unique across all releases.
+          version_code="${GITHUB_RUN_NUMBER}"
+          {
+            echo "version_name=${version_name}"
+            echo "version_code=${version_code}"
+            echo "patch=${patch}"
+            echo "tag=v${version_name}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Computed versionName=${version_name} versionCode=${version_code}"
+
       - name: Decode signing keystore
         env:
           ANDROID_SIGNING_KEYSTORE_B64: ${{ secrets.ANDROID_SIGNING_KEYSTORE_B64 }}
@@ -64,7 +95,7 @@ jobs:
           ANDROID_SIGNING_STORE_PASSWORD: ${{ secrets.ANDROID_SIGNING_STORE_PASSWORD }}
           ANDROID_SIGNING_KEY_ALIAS: ${{ secrets.ANDROID_SIGNING_KEY_ALIAS }}
           ANDROID_SIGNING_KEY_PASSWORD: ${{ secrets.ANDROID_SIGNING_KEY_PASSWORD }}
-        run: ./gradlew testDebugUnitTest jacocoTestReport jacocoTestCoverageVerification assembleRelease -PminCoverage=0.70
+        run: ./gradlew testDebugUnitTest jacocoTestReport jacocoTestCoverageVerification assembleRelease -PminCoverage=0.70 -PversionPatch=${{ steps.semver.outputs.patch }} -PversionCode=${{ steps.semver.outputs.version_code }}
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
@@ -78,9 +109,10 @@ jobs:
           name: jacoco-report
           path: app/build/reports/jacoco/jacocoTestReport/html
 
-      - name: Generate release metadata
+      - name: Rename APK for release
         id: meta
         run: |
+          set -euo pipefail
           app_name="$(python3 - <<'PY'
           import re
           from pathlib import Path
@@ -89,41 +121,30 @@ jobs:
           print(m.group(1) if m else 'VoiceNoteHater')
           PY
           )"
-          version_name="$(python3 - <<'PY'
-          import re
-          from pathlib import Path
-          gradle = Path('app/build.gradle.kts').read_text(encoding='utf-8')
-          m = re.search(r'versionName\s*=\s*"([^"]+)"', gradle)
-          print(m.group(1) if m else '0.0.0')
-          PY
-          )"
-
           safe_app_name="$(echo "$app_name" | tr '[:space:]' '-' | tr -cd '[:alnum:]._-')"
           short_sha="${GITHUB_SHA::7}"
-          timestamp="$(date -u +'%Y%m%d-%H%M%S')"
-          tag="apk-${timestamp}-${short_sha}"
+          version_name="${{ steps.semver.outputs.version_name }}"
           title="${app_name} v${version_name} (${short_sha})"
           apk_name="${safe_app_name}-v${version_name}.apk"
 
           cp app/build/outputs/apk/release/app-release.apk "app/build/outputs/apk/release/${apk_name}"
 
           {
-            echo "tag=${tag}"
             echo "title=${title}"
-            echo "version_name=${version_name}"
             echo "apk_name=${apk_name}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub release with APK
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.meta.outputs.tag }}
+          tag_name: ${{ steps.semver.outputs.tag }}
           name: ${{ steps.meta.outputs.title }}
           generate_release_notes: true
           body: |
             Automated APK release from `${{ github.ref_name }}`.
 
-            - Version: `${{ steps.meta.outputs.version_name }}`
+            - Version: `${{ steps.semver.outputs.version_name }}`
+            - versionCode: `${{ steps.semver.outputs.version_code }}`
             - Commit: `${{ github.sha }}`
             - Triggered by: `${{ github.actor }}`
             - Compare: https://github.com/${{ github.repository }}/compare/${{ github.event.before }}...${{ github.sha }}
