@@ -9,8 +9,18 @@ class PendingContactMatchTest {
 
     @Before
     fun setup() {
-        // Clear state between tests by consuming all
-        repeat(100) { PendingContactMatch.consumeMatch(0) }
+        val lockField = PendingContactMatch::class.java.getDeclaredField("lock")
+        lockField.isAccessible = true
+        val entriesField = PendingContactMatch::class.java.getDeclaredField("entries")
+        entriesField.isAccessible = true
+
+        val lock = lockField.get(PendingContactMatch) ?: return
+        @Suppress("UNCHECKED_CAST")
+        val entries = entriesField.get(PendingContactMatch) as MutableList<Any?>
+
+        synchronized(lock) {
+            entries.clear()
+        }
     }
 
     @Test
