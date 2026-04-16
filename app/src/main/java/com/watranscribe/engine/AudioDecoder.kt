@@ -24,6 +24,7 @@ data class DecodedAudio(
 }
 
 private const val TAG = "AudioDecoder"
+private const val MAX_REASONABLE_AUDIO_DURATION_MS = 7_200_000L // 2 hours
 
 @Singleton
 class AudioDecoder @Inject constructor(
@@ -45,8 +46,13 @@ class AudioDecoder @Inject constructor(
                 ?: error("No MIME type in track format")
             val sampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
             val channelCount = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
-            val durationUs = format.getLong(MediaFormat.KEY_DURATION)
-            Log.d(TAG, "decode: mime=$mime, rate=$sampleRate, channels=$channelCount, duration=${durationUs/1000}ms")
+            val durationUs = if (format.containsKey(MediaFormat.KEY_DURATION)) {
+                runCatching { format.getLong(MediaFormat.KEY_DURATION) }.getOrDefault(0L)
+            } else {
+                0L
+            }
+            val metadataDurationMs = durationUs / 1000L
+            Log.d(TAG, "decode: mime=$mime, rate=$sampleRate, channels=$channelCount, duration=${metadataDurationMs}ms")
 
             codec = MediaCodec.createDecoderByType(mime)
             codec.configure(format, null, null, 0)
@@ -106,8 +112,19 @@ class AudioDecoder @Inject constructor(
             val floatSamples = pcmBytesToFloat(pcmBytes)
             val resampled = resampleTo16kHz(floatSamples, sampleRate, channelCount)
 
-            Log.d(TAG, "decode: resampled to ${resampled.size} float samples (16kHz mono), duration=${durationUs/1000}ms")
-            DecodedAudio(samples = resampled, durationMs = durationUs / 1000)
+            val decodedDurationMs = if (resampled.isNotEmpty()) {
+                (resampled.size * 1000L) / 16000L
+            } else {
+                0L
+            }
+            val safeDuration = when {
+                decodedDurationMs in 1L..MAX_REASONABLE_AUDIO_DURATION_MS -> decodedDurationMs
+                metadataDurationMs in 1L..MAX_REASONABLE_AUDIO_DURATION_MS -> metadataDurationMs
+                else -> 0L
+            }
+
+            Log.d(TAG, "decode: resampled to ${resampled.size} float samples (16kHz mono), safeDuration=${safeDuration}ms")
+            DecodedAudio(samples = resampled, durationMs = safeDuration)
         } finally {
             try { codec?.stop() } catch (_: Exception) {}
             try { codec?.release() } catch (_: Exception) {}

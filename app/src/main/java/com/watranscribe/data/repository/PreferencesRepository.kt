@@ -28,7 +28,7 @@ class PreferencesRepository @Inject constructor(
     }
 
     val folderUri: Flow<String?> = store.data.map { it[FOLDER_URI] }
-    val modelSize: Flow<String> = store.data.map { it[MODEL_SIZE] ?: "base" }
+    val modelSize: Flow<String> = store.data.map { it[MODEL_SIZE] ?: "base.en" }
     val backgroundScanEnabled: Flow<Boolean> = store.data.map { it[BACKGROUND_SCAN] ?: true }
 
     suspend fun setFolderUri(uri: String) {

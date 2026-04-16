@@ -71,6 +71,10 @@ import com.watranscribe.data.local.TimedSegment
 import com.watranscribe.data.local.TranscriptionEntity
 import com.watranscribe.data.local.TranscriptionStatus
 import kotlinx.coroutines.delay
+import java.time.DayOfWeek
+import java.time.LocalDate
+import java.time.format.DateTimeFormatter
+import java.time.temporal.WeekFields
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -86,6 +90,7 @@ fun TranscriptionListScreen(
     val isScanning by viewModel.isScanning.collectAsState()
     val transcribingId by viewModel.transcribingId.collectAsState()
     val liveText by viewModel.liveText.collectAsState()
+    val sortMode by viewModel.sortMode.collectAsState()
 
     var playingId by remember { mutableStateOf<Long?>(null) }
 
@@ -147,6 +152,29 @@ fun TranscriptionListScreen(
             singleLine = true
         )
 
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            SortChip(
+                label = "Newest",
+                selected = sortMode == ListSortMode.NEWEST,
+                onClick = { viewModel.setSortMode(ListSortMode.NEWEST) },
+            )
+            SortChip(
+                label = "Audio Length",
+                selected = sortMode == ListSortMode.AUDIO_LENGTH,
+                onClick = { viewModel.setSortMode(ListSortMode.AUDIO_LENGTH) },
+            )
+            SortChip(
+                label = "Week Buckets",
+                selected = sortMode == ListSortMode.WEEK_BUCKETS,
+                onClick = { viewModel.setSortMode(ListSortMode.WEEK_BUCKETS) },
+            )
+        }
+
         // Notification access banner
         val context = LocalContext.current
         val notifEnabled = remember {
@@ -193,16 +221,18 @@ fun TranscriptionListScreen(
                 }
             }
         } else {
-            val grouped = transcriptions.groupBy { it.conversationFolder }
+            val sections = remember(transcriptions, sortMode) {
+                buildSections(transcriptions, sortMode)
+            }
             val listState = rememberLazyListState()
 
             // Auto-scroll to actively transcribing item
             LaunchedEffect(transcribingId) {
                 if (transcribingId != null) {
                     var idx = 0
-                    for ((_, items) in grouped) {
-                        idx++ // header
-                        for (item in items) {
+                    for (section in sections) {
+                        if (section.showHeader) idx++
+                        for (item in section.items) {
                             if (item.id == transcribingId) {
                                 listState.animateScrollToItem(idx)
                                 return@LaunchedEffect
@@ -220,16 +250,18 @@ fun TranscriptionListScreen(
                     .padding(horizontal = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(2.dp)
             ) {
-                grouped.forEach { (folder, items) ->
-                    item(key = "header_$folder") {
-                        Text(
-                            text = folder,
-                            style = MaterialTheme.typography.labelMedium,
-                            color = Color(0xFF666666),
-                            modifier = Modifier.padding(top = 16.dp, bottom = 8.dp)
-                        )
+                sections.forEach { section ->
+                    if (section.showHeader) {
+                        item(key = "header_${section.key}") {
+                            Text(
+                                text = section.title,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = Color(0xFF666666),
+                                modifier = Modifier.padding(top = 16.dp, bottom = 8.dp)
+                            )
+                        }
                     }
-                    items(items, key = { it.id }) { transcription ->
+                    items(section.items, key = { it.id }) { transcription ->
                         TranscriptionCard(
                             entity = transcription,
                             isTranscribing = transcription.id == transcribingId,
@@ -247,6 +279,111 @@ fun TranscriptionListScreen(
             }
         }
     }
+}
+
+@Composable
+private fun SortChip(label: String, selected: Boolean, onClick: () -> Unit) {
+    Text(
+        text = label,
+        style = MaterialTheme.typography.labelMedium,
+        color = if (selected) Color.Black else Color(0xFF999999),
+        modifier = Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(if (selected) Color.White else Color(0xFF111111))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 6.dp)
+    )
+}
+
+private data class ListSection(
+    val key: String,
+    val title: String,
+    val showHeader: Boolean,
+    val items: List<TranscriptionEntity>,
+)
+
+private fun buildSections(
+    transcriptions: List<TranscriptionEntity>,
+    sortMode: ListSortMode,
+): List<ListSection> {
+    return when (sortMode) {
+        ListSortMode.NEWEST -> listOf(
+            ListSection(
+                key = "all_newest",
+                title = "",
+                showHeader = false,
+                items = transcriptions.sortedByDescending { it.lastModified },
+            )
+        )
+        ListSortMode.AUDIO_LENGTH -> listOf(
+            ListSection(
+                key = "all_length",
+                title = "",
+                showHeader = false,
+                items = transcriptions.sortedWith(
+                    compareByDescending<TranscriptionEntity> { it.durationMs }
+                        .thenByDescending { it.lastModified }
+                ),
+            )
+        )
+        ListSortMode.WEEK_BUCKETS -> {
+            val grouped = transcriptions.groupBy { it.conversationFolder }
+            grouped
+                .toList()
+                .sortedByDescending { weekSortKey(it.first) }
+                .map { (folder, items) ->
+                    ListSection(
+                        key = folder,
+                        title = weekBucketLabel(folder),
+                        showHeader = true,
+                        items = items.sortedByDescending { it.lastModified },
+                    )
+                }
+        }
+    }
+}
+
+private fun weekSortKey(folder: String): Long {
+    val parsed = parseYearWeek(folder) ?: return Long.MIN_VALUE
+    return parsed.first * 100L + parsed.second
+}
+
+private fun weekBucketLabel(folder: String): String {
+    val yearWeek = parseYearWeek(folder) ?: return folder
+    val wf = WeekFields.ISO
+    return try {
+        val start = LocalDate.of(yearWeek.first.toInt(), 1, 4)
+            .with(wf.weekOfWeekBasedYear(), yearWeek.second)
+            .with(DayOfWeek.MONDAY)
+        val end = start.plusDays(6)
+        val shortFmt = DateTimeFormatter.ofPattern("MMM d", Locale.getDefault())
+        val longFmt = DateTimeFormatter.ofPattern("MMM d, yyyy", Locale.getDefault())
+        val range = if (start.year == end.year) {
+            "${start.format(shortFmt)} - ${end.format(longFmt)}"
+        } else {
+            "${start.format(longFmt)} - ${end.format(longFmt)}"
+        }
+        "$range · W${yearWeek.second.toInt()}"
+    } catch (_: Exception) {
+        folder
+    }
+}
+
+private fun parseYearWeek(folder: String): Pair<Long, Long>? {
+    val compact = Regex("^(\\d{4})(\\d{2})$").matchEntire(folder)
+    if (compact != null) {
+        val year = compact.groupValues[1].toLongOrNull() ?: return null
+        val week = compact.groupValues[2].toLongOrNull() ?: return null
+        return if (week in 1..53) year to week else null
+    }
+
+    val pretty = Regex("^(\\d{4})\\s*W(\\d{1,2})$").matchEntire(folder)
+    if (pretty != null) {
+        val year = pretty.groupValues[1].toLongOrNull() ?: return null
+        val week = pretty.groupValues[2].toLongOrNull() ?: return null
+        return if (week in 1..53) year to week else null
+    }
+    return null
 }
 
 @OptIn(ExperimentalFoundationApi::class)

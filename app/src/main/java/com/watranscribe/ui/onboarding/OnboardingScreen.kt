@@ -2,6 +2,7 @@ package com.watranscribe.ui.onboarding
 
 import android.app.Activity
 import android.content.Intent
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -20,17 +21,26 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.watranscribe.R
+import com.watranscribe.engine.WhatsAppNotificationListener
 
 @Composable
 fun OnboardingScreen(
@@ -38,6 +48,20 @@ fun OnboardingScreen(
     viewModel: OnboardingViewModel = hiltViewModel()
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var notificationsEnabled by remember {
+        mutableStateOf(WhatsAppNotificationListener.isEnabled(context))
+    }
+
+    DisposableEffect(lifecycleOwner, context) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                notificationsEnabled = WhatsAppNotificationListener.isEnabled(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     val folderPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
@@ -101,8 +125,7 @@ fun OnboardingScreen(
 
         Button(
             onClick = {
-                val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
-                folderPickerLauncher.launch(intent)
+                context.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
             },
             modifier = Modifier
                 .fillMaxWidth()
@@ -114,9 +137,47 @@ fun OnboardingScreen(
             )
         ) {
             Text(
-                text = "Select Voice Notes Folder",
+                text = if (notificationsEnabled) "Notification Access Enabled" else "Enable Notification Access",
                 style = MaterialTheme.typography.labelLarge.copy(
                     color = Color.Black,
+                    fontWeight = FontWeight.SemiBold
+                )
+            )
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        Text(
+            text = if (notificationsEnabled) {
+                "Great - now pick your WhatsApp folder below."
+            } else {
+                "Essential: this lets us detect who sent each voice note and auto-transcribe new ones instantly."
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = Color(0xFF444444),
+            textAlign = TextAlign.Center
+        )
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        Button(
+            onClick = {
+                val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
+                folderPickerLauncher.launch(intent)
+            },
+            enabled = notificationsEnabled,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(56.dp),
+            shape = RoundedCornerShape(12.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = if (notificationsEnabled) Color.White else Color(0xFF1A1A1A),
+                contentColor = if (notificationsEnabled) Color.Black else Color(0xFF666666)
+            )
+        ) {
+            Text(
+                text = "Select Voice Notes Folder",
+                style = MaterialTheme.typography.labelLarge.copy(
                     fontWeight = FontWeight.SemiBold
                 )
             )

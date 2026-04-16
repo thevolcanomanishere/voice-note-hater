@@ -55,6 +55,9 @@ class SettingsViewModel @Inject constructor(
         viewModelScope, SharingStarted.WhileSubscribed(5000), null
     )
 
+    private val _folderResolutionHint = MutableStateFlow<String?>(null)
+    val folderResolutionHint: StateFlow<String?> = _folderResolutionHint.asStateFlow()
+
     val modelSize = prefsRepo.modelSize.stateIn(
         viewModelScope, SharingStarted.WhileSubscribed(5000), "base.en"
     )
@@ -154,6 +157,22 @@ class SettingsViewModel @Inject constructor(
             _transcriptionCount.value = transcriptionRepo.count()
             refreshDownloadedModels()
         }
+
+        viewModelScope.launch {
+            folderUri.collect { uriStr ->
+                if (uriStr.isNullOrBlank()) {
+                    _folderResolutionHint.value = null
+                    return@collect
+                }
+                val uri = runCatching { Uri.parse(uriStr) }.getOrNull()
+                if (uri == null) {
+                    _folderResolutionHint.value = null
+                    return@collect
+                }
+                val hint = runCatching { transcriptionRepo.getFolderResolutionHint(uri) }.getOrNull()
+                _folderResolutionHint.value = hint
+            }
+        }
     }
 
     private fun refreshDownloadedModels() {
@@ -162,7 +181,12 @@ class SettingsViewModel @Inject constructor(
     }
 
     fun onFolderSelected(uri: Uri) {
-        viewModelScope.launch { prefsRepo.setFolderUri(uri.toString()) }
+        viewModelScope.launch {
+            prefsRepo.setFolderUri(uri.toString())
+            _folderResolutionHint.value = runCatching {
+                transcriptionRepo.getFolderResolutionHint(uri)
+            }.getOrNull()
+        }
     }
 
     fun onModelSelected(model: ModelInfo) {

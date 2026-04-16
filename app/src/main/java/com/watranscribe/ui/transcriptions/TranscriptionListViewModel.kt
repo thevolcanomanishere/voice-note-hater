@@ -22,6 +22,12 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
+enum class ListSortMode {
+    NEWEST,
+    AUDIO_LENGTH,
+    WEEK_BUCKETS,
+}
+
 @HiltViewModel
 class TranscriptionListViewModel @Inject constructor(
     private val repo: TranscriptionRepository,
@@ -47,6 +53,9 @@ class TranscriptionListViewModel @Inject constructor(
     private val _isScanning = MutableStateFlow(false)
     val isScanning: StateFlow<Boolean> = _isScanning.asStateFlow()
 
+    private val _sortMode = MutableStateFlow(ListSortMode.NEWEST)
+    val sortMode: StateFlow<ListSortMode> = _sortMode.asStateFlow()
+
     /** ID of the item currently being transcribed, for UI indication */
     private val _transcribingId = MutableStateFlow<Long?>(null)
     val transcribingId: StateFlow<Long?> = _transcribingId.asStateFlow()
@@ -71,6 +80,10 @@ class TranscriptionListViewModel @Inject constructor(
                 _isScanning.value = false
             }
         }
+    }
+
+    fun setSortMode(mode: ListSortMode) {
+        _sortMode.value = mode
     }
 
     fun getDownloadedModels(): List<ModelInfo> = modelManager.getDownloadedModels()

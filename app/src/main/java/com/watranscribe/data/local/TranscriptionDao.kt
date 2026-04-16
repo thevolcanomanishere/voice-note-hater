@@ -18,6 +18,11 @@ data class StatusStat(
 @Dao
 interface TranscriptionDao {
 
+    companion object {
+        // Guardrail for corrupted/unknown media durations (e.g. bogus Long.MAX-like values).
+        const val MAX_REASONABLE_DURATION_MS = 21_600_000L // 6 hours
+    }
+
     @Query("SELECT * FROM transcriptions ORDER BY last_modified DESC")
     fun getAllTranscriptions(): Flow<List<TranscriptionEntity>>
 
@@ -70,7 +75,8 @@ interface TranscriptionDao {
     suspend fun count(): Int
 
     @Query(
-        "SELECT status AS status, COUNT(*) AS cnt, COALESCE(SUM(duration_ms), 0) AS dur " +
+        "SELECT status AS status, COUNT(*) AS cnt, " +
+            "COALESCE(SUM(CASE WHEN duration_ms BETWEEN 1 AND ${MAX_REASONABLE_DURATION_MS} THEN duration_ms ELSE 0 END), 0) AS dur " +
         "FROM transcriptions GROUP BY status"
     )
     fun observeStatusStats(): Flow<List<StatusStat>>

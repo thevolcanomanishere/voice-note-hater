@@ -62,6 +62,7 @@ fun SettingsScreen(
 ) {
     val context = LocalContext.current
     val folderUri by viewModel.folderUri.collectAsState()
+    val folderResolutionHint by viewModel.folderResolutionHint.collectAsState()
     val modelSize by viewModel.modelSize.collectAsState()
     val backgroundScan by viewModel.backgroundScanEnabled.collectAsState()
     val transcriptionCount by viewModel.transcriptionCount.collectAsState()
@@ -129,6 +130,14 @@ fun SettingsScreen(
                         folderPickerLauncher.launch(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE))
                     }
                 )
+                folderResolutionHint?.let { hint ->
+                    Text(
+                        text = hint,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFF666666),
+                        modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp)
+                    )
+                }
             }
 
             Spacer(Modifier.height(8.dp))

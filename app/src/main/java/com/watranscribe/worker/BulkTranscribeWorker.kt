@@ -41,6 +41,10 @@ class BulkTranscribeWorker @AssistedInject constructor(
     private val modelManager: ModelManager,
 ) : CoroutineWorker(context, params) {
 
+    private fun safeDurationMs(raw: Long): Long {
+        return if (raw in 1L..MAX_REASONABLE_DURATION_MS) raw else 0L
+    }
+
     override suspend fun doWork(): Result {
         try {
             return runBulk()
@@ -63,7 +67,7 @@ class BulkTranscribeWorker @AssistedInject constructor(
         // arriving mid-run will be picked up by the next bulk or by the quick worker.
         val items = transcriptionRepo.getPendingAndFailed()
         val total = items.size
-        val totalAudioMs = items.sumOf { it.durationMs }
+        val totalAudioMs = items.sumOf { safeDurationMs(it.durationMs) }
         val startedAt = System.currentTimeMillis()
         Log.d(TAG, "Bulk: $total items, totalAudio=${totalAudioMs / 1000}s")
         if (total == 0) return Result.success()
@@ -103,7 +107,7 @@ class BulkTranscribeWorker @AssistedInject constructor(
             val fileStart = System.currentTimeMillis()
             try {
                 transcriptionRepo.transcribe(entry, modelOverride = target)
-                processedAudioMs += entry.durationMs
+                processedAudioMs += safeDurationMs(entry.durationMs)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -152,5 +156,6 @@ class BulkTranscribeWorker @AssistedInject constructor(
         const val KEY_PROCESSED_AUDIO_MS = "processed_audio_ms"
         const val KEY_PROCESSED_WALL_MS = "processed_wall_ms"
         const val KEY_STARTED_AT = "started_at"
+        private const val MAX_REASONABLE_DURATION_MS = 21_600_000L // 6 hours
     }
 }

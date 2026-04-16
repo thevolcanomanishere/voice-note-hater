@@ -21,10 +21,18 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.ArrayDeque
+import java.util.Locale
 import javax.inject.Inject
 import javax.inject.Singleton
 
 private const val TAG = "TranscriptionRepo"
+private const val MAX_REASONABLE_AUDIO_DURATION_MS = 7_200_000L // 2 hours
+private val WEEK_FOLDER_REGEX = Regex("^\\d{6}$")
+private val VOICE_NOTES_FOLDER_NAMES = setOf(
+    "whatsapp voice notes",
+    "whatsapp business voice notes"
+)
 
 @Singleton
 class TranscriptionRepository @Inject constructor(
@@ -32,8 +40,11 @@ class TranscriptionRepository @Inject constructor(
     private val engines: Map<String, @JvmSuppressWildcards TranscriptionEngine>,
     private val audioDecoder: AudioDecoder,
     private val prefsRepo: PreferencesRepository,
+    private val modelManager: ModelManager,
     @ApplicationContext private val context: Context
 ) {
+    private val resolvedVoiceRootCache = mutableMapOf<String, String>()
+
     fun getAllTranscriptions(): Flow<List<TranscriptionEntity>> = dao.getAllTranscriptions()
 
     fun getConversationFolders(): Flow<List<String>> = dao.getConversationFolders()
@@ -58,10 +69,15 @@ class TranscriptionRepository @Inject constructor(
         val resolver = context.contentResolver
 
         val rootDocId = DocumentsContract.getTreeDocumentId(folderUri)
-        val rootChildrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(folderUri, rootDocId)
+        val effectiveRootDocId = resolveVoiceNotesRootDocId(folderUri, rootDocId)
+        if (effectiveRootDocId != rootDocId) {
+            Log.d(TAG, "scanForNewFiles: auto-resolved voice notes folder docId=$effectiveRootDocId")
+        }
+        val rootChildrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(folderUri, effectiveRootDocId)
 
         // Step 1: list all week folders
         val weekFolders = mutableListOf<Pair<String, String>>() // docId, displayName
+        var directOpusAtRoot = 0
         resolver.query(
             rootChildrenUri,
             arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID, DocumentsContract.Document.COLUMN_DISPLAY_NAME, DocumentsContract.Document.COLUMN_MIME_TYPE),
@@ -72,9 +88,23 @@ class TranscriptionRepository @Inject constructor(
             val mimeIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
             while (cursor.moveToNext()) {
                 val mime = cursor.getString(mimeIdx)
-                if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
-                    weekFolders.add(cursor.getString(idIdx) to cursor.getString(nameIdx))
+                val folderName = cursor.getString(nameIdx) ?: continue
+                if (mime == DocumentsContract.Document.MIME_TYPE_DIR && isWeekFolderName(folderName)) {
+                    weekFolders.add(cursor.getString(idIdx) to folderName)
+                } else if (mime != DocumentsContract.Document.MIME_TYPE_DIR && folderName.endsWith(".opus", ignoreCase = true)) {
+                    directOpusAtRoot++
                 }
+            }
+        }
+        if (weekFolders.isEmpty()) {
+            val rootName = getDocumentDisplayName(folderUri, effectiveRootDocId)
+            if (isWeekFolderName(rootName) || directOpusAtRoot > 0) {
+                val pseudoName = rootName.ifBlank { "Selected Folder" }
+                weekFolders.add(effectiveRootDocId to pseudoName)
+                Log.w(
+                    TAG,
+                    "scanForNewFiles: no week folders at root; treating selected folder as scan root (name=$pseudoName directOpus=$directOpusAtRoot)"
+                )
             }
         }
         Log.d(TAG, "scanForNewFiles: found ${weekFolders.size} week folders")
@@ -131,8 +161,8 @@ class TranscriptionRepository @Inject constructor(
                 val contact = PendingContactMatch.consumeMatch(entity.lastModified) ?: ""
                 dao.insert(entity.copy(contact = contact))
                 newCount++
-            } else if (existing.durationMs == 0L && entity.durationMs > 0) {
-                // Backfill duration for existing entries
+            } else if (!isSaneDurationMs(existing.durationMs) && isSaneDurationMs(entity.durationMs)) {
+                // Backfill/sanitize duration for existing entries when we now have a sane value.
                 dao.update(existing.copy(durationMs = entity.durationMs))
             }
         }
@@ -141,25 +171,289 @@ class TranscriptionRepository @Inject constructor(
         newCount
     }
 
+    suspend fun getFolderResolutionHint(folderUri: Uri): String? = withContext(Dispatchers.IO) {
+        val rootDocId = DocumentsContract.getTreeDocumentId(folderUri)
+        val effectiveRootDocId = resolveVoiceNotesRootDocId(folderUri, rootDocId)
+        if (effectiveRootDocId == rootDocId) return@withContext null
+
+        val rootName = getDocumentDisplayName(folderUri, rootDocId)
+        val effectiveName = getDocumentDisplayName(folderUri, effectiveRootDocId)
+        if (effectiveName.isBlank()) return@withContext null
+
+        if (rootName.isBlank()) {
+            "Auto-detected folder: $effectiveName"
+        } else {
+            "Auto-detected $effectiveName inside $rootName"
+        }
+    }
+
     private fun getDuration(uri: Uri): Long {
+        fun sanitizeDuration(ms: Long): Long = if (isSaneDurationMs(ms)) ms else 0L
+
+        // Prefer MediaExtractor track duration first (usually most reliable for opus).
+        try {
+            val extractor = android.media.MediaExtractor()
+            try {
+                extractor.setDataSource(context, uri, null)
+                for (i in 0 until extractor.trackCount) {
+                    val format = extractor.getTrackFormat(i)
+                    val mime = format.getString(android.media.MediaFormat.KEY_MIME) ?: continue
+                    if (!mime.startsWith("audio/")) continue
+                    val durUs = if (format.containsKey(android.media.MediaFormat.KEY_DURATION)) {
+                        runCatching { format.getLong(android.media.MediaFormat.KEY_DURATION) }.getOrDefault(0L)
+                    } else {
+                        0L
+                    }
+                    val ms = sanitizeDuration(durUs / 1000L)
+                    if (ms > 0) return ms
+                    break
+                }
+            } finally {
+                extractor.release()
+            }
+        } catch (_: Exception) {
+            // Fall through to MediaMetadataRetriever fallback.
+        }
+
         return try {
             val mmr = MediaMetadataRetriever()
             mmr.setDataSource(context, uri)
-            val ms = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0
+            val raw = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0
             mmr.release()
-            ms
+            sanitizeDuration(raw)
         } catch (_: Exception) {
             0
         }
     }
 
     private fun parseWeekFolder(name: String): String {
-        if (name.length == 6) {
+        if (isWeekFolderName(name)) {
             val year = name.substring(0, 4)
             val week = name.substring(4, 6).trimStart('0')
             return "$year W$week"
         }
         return name
+    }
+
+    private fun isWeekFolderName(name: String): Boolean = WEEK_FOLDER_REGEX.matches(name)
+
+    private fun resolveVoiceNotesRootDocId(treeUri: Uri, treeRootDocId: String): String {
+        synchronized(resolvedVoiceRootCache) {
+            resolvedVoiceRootCache[treeRootDocId]?.let { return it }
+        }
+
+        val resolved = resolveVoiceNotesRootDocIdUncached(treeUri, treeRootDocId)
+        synchronized(resolvedVoiceRootCache) {
+            resolvedVoiceRootCache[treeRootDocId] = resolved
+        }
+        return resolved
+    }
+
+    private fun resolveVoiceNotesRootDocIdUncached(treeUri: Uri, treeRootDocId: String): String {
+        val rootName = getDocumentDisplayName(treeUri, treeRootDocId)
+        if (isVoiceNotesFolderName(rootName)) return treeRootDocId
+
+        // Fast deterministic paths from common user selections.
+        val candidatePaths: List<List<List<String>>> = listOf(
+            listOf(listOf("WhatsApp Voice Notes")),
+            listOf(listOf("WhatsApp Business Voice Notes")),
+            listOf(listOf("Media"), listOf("WhatsApp Voice Notes")),
+            listOf(listOf("Media"), listOf("WhatsApp Business Voice Notes")),
+            listOf(listOf("WhatsApp"), listOf("Media"), listOf("WhatsApp Voice Notes")),
+            listOf(listOf("WhatsApp Business"), listOf("Media"), listOf("WhatsApp Business Voice Notes")),
+            listOf(
+                listOf("Android"),
+                listOf("media"),
+                listOf("com.whatsapp"),
+                listOf("WhatsApp"),
+                listOf("Media"),
+                listOf("WhatsApp Voice Notes")
+            ),
+            listOf(
+                listOf("Android"),
+                listOf("media"),
+                listOf("com.whatsapp.w4b"),
+                listOf("WhatsApp Business", "WhatsApp"),
+                listOf("Media"),
+                listOf("WhatsApp Business Voice Notes", "WhatsApp Voice Notes")
+            )
+        )
+
+        for (path in candidatePaths) {
+            val docId = findDocIdByPath(treeUri, treeRootDocId, path) ?: continue
+            if (isLikelyVoiceNotesFolder(treeUri, docId)) return docId
+        }
+
+        // Fallback: bounded BFS for anything named *Voice Notes*.
+        return findVoiceNotesByBfs(treeUri, treeRootDocId) ?: treeRootDocId
+    }
+
+    private fun findDocIdByPath(
+        treeUri: Uri,
+        startDocId: String,
+        path: List<List<String>>,
+    ): String? {
+        var current = startDocId
+        for (segmentOptions in path) {
+            val next = findChildDirectoryByName(treeUri, current, segmentOptions) ?: return null
+            current = next
+        }
+        return current
+    }
+
+    private fun findChildDirectoryByName(
+        treeUri: Uri,
+        parentDocId: String,
+        names: List<String>,
+    ): String? {
+        val wanted = names.map { it.lowercase(Locale.ROOT) }.toSet()
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentDocId)
+        return try {
+            context.contentResolver.query(
+                childrenUri,
+                arrayOf(
+                    DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                    DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                    DocumentsContract.Document.COLUMN_MIME_TYPE,
+                ),
+                null,
+                null,
+                null,
+            )?.use { cursor ->
+                val idIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                val nameIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                val mimeIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
+                while (cursor.moveToNext()) {
+                    val mime = cursor.getString(mimeIdx)
+                    if (mime != DocumentsContract.Document.MIME_TYPE_DIR) continue
+                    val name = cursor.getString(nameIdx) ?: continue
+                    if (name.lowercase(Locale.ROOT) in wanted) {
+                        return cursor.getString(idIdx)
+                    }
+                }
+                null
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun getDocumentDisplayName(treeUri: Uri, docId: String): String {
+        val docUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
+        return try {
+            context.contentResolver.query(
+                docUri,
+                arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME),
+                null,
+                null,
+                null,
+            )?.use { cursor ->
+                if (!cursor.moveToFirst()) return@use ""
+                val idx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                cursor.getString(idx) ?: ""
+            } ?: ""
+        } catch (_: Exception) {
+            ""
+        }
+    }
+
+    private fun isLikelyVoiceNotesFolder(treeUri: Uri, docId: String): Boolean {
+        val name = getDocumentDisplayName(treeUri, docId)
+        if (isVoiceNotesFolderName(name)) return true
+
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, docId)
+        return try {
+            context.contentResolver.query(
+                childrenUri,
+                arrayOf(
+                    DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                    DocumentsContract.Document.COLUMN_MIME_TYPE,
+                ),
+                null,
+                null,
+                null,
+            )?.use { cursor ->
+                val nameIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                val mimeIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
+                while (cursor.moveToNext()) {
+                    val childName = cursor.getString(nameIdx) ?: continue
+                    val mime = cursor.getString(mimeIdx)
+                    if (mime == DocumentsContract.Document.MIME_TYPE_DIR && isWeekFolderName(childName)) {
+                        return true
+                    }
+                    if (mime != DocumentsContract.Document.MIME_TYPE_DIR && childName.endsWith(".opus", ignoreCase = true)) {
+                        return true
+                    }
+                }
+                false
+            } ?: false
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun findVoiceNotesByBfs(treeUri: Uri, startDocId: String): String? {
+        data class Node(val docId: String, val depth: Int)
+
+        val queue = ArrayDeque<Node>()
+        val visited = hashSetOf<String>()
+        queue.add(Node(startDocId, 0))
+        visited.add(startDocId)
+
+        val maxDepth = 6
+        val maxVisited = 120
+
+        while (queue.isNotEmpty() && visited.size <= maxVisited) {
+            val node = queue.removeFirst()
+            val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, node.docId)
+
+            val children = try {
+                context.contentResolver.query(
+                    childrenUri,
+                    arrayOf(
+                        DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                        DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                        DocumentsContract.Document.COLUMN_MIME_TYPE,
+                    ),
+                    null,
+                    null,
+                    null,
+                )?.use { cursor ->
+                    val idIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                    val nameIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                    val mimeIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
+                    val out = mutableListOf<Triple<String, String, String>>()
+                    while (cursor.moveToNext()) {
+                        out.add(
+                            Triple(
+                                cursor.getString(idIdx),
+                                cursor.getString(nameIdx),
+                                cursor.getString(mimeIdx)
+                            )
+                        )
+                    }
+                    out
+                } ?: emptyList()
+            } catch (_: Exception) {
+                emptyList()
+            }
+
+            for ((childDocId, childName, childMime) in children) {
+                if (childMime != DocumentsContract.Document.MIME_TYPE_DIR) continue
+                val lower = childName.lowercase(Locale.ROOT)
+                if (lower.contains("voice notes") && isLikelyVoiceNotesFolder(treeUri, childDocId)) {
+                    return childDocId
+                }
+                if (node.depth < maxDepth && visited.add(childDocId)) {
+                    queue.add(Node(childDocId, node.depth + 1))
+                }
+            }
+        }
+        return null
+    }
+
+    private fun isVoiceNotesFolderName(name: String): Boolean {
+        return name.lowercase(Locale.ROOT) in VOICE_NOTES_FOLDER_NAMES
     }
 
     private fun parseDateFromFilename(name: String): Long? {
@@ -191,10 +485,20 @@ class TranscriptionRepository @Inject constructor(
 
         // Load the user's selected model (or the override)
         val modelStart = System.nanoTime()
-        val selectedModel = modelOverride ?: run {
+        val selectedModel = if (modelOverride != null) {
+            check(modelManager.isDownloaded(modelOverride)) {
+                "Model not downloaded: ${modelOverride.displayName}. Download it from Settings."
+            }
+            modelOverride
+        } else {
             val selectedId = prefsRepo.modelSize.first()
-            ModelManager.AVAILABLE_MODELS.find { it.id == selectedId }
-                ?: ModelManager.AVAILABLE_MODELS.first { it.id == "base.en" }
+            val preferred = ModelManager.AVAILABLE_MODELS.find { it.id == selectedId }
+            val downloaded = modelManager.getDownloadedModels()
+            when {
+                preferred != null && modelManager.isDownloaded(preferred) -> preferred
+                downloaded.isNotEmpty() -> downloaded.first()
+                else -> error("No model downloaded. Go to Settings > Models and download one.")
+            }
         }
         val engine = engines[selectedModel.engine]
             ?: error("No engine registered for '${selectedModel.engine}' (model ${selectedModel.id})")
@@ -210,7 +514,7 @@ class TranscriptionRepository @Inject constructor(
         val audioSec = decoded.durationMs / 1000.0
         Log.d(TAG, "PERF decode=${decodeMs}ms audio=${audioSec}s samples=${decoded.samples.size}")
 
-        if (entity.durationMs == 0L && decoded.durationMs > 0) {
+        if (!isSaneDurationMs(entity.durationMs) && isSaneDurationMs(decoded.durationMs)) {
             dao.update(entity.copy(durationMs = decoded.durationMs))
         }
 
@@ -267,3 +571,4 @@ class TranscriptionRepository @Inject constructor(
         dao.clearAllTranscriptions()
     }
 }
+    private fun isSaneDurationMs(ms: Long): Boolean = ms in 1L..MAX_REASONABLE_AUDIO_DURATION_MS

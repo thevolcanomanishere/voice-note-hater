@@ -5,7 +5,7 @@ import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
-@Database(entities = [TranscriptionEntity::class], version = 4, exportSchema = false)
+@Database(entities = [TranscriptionEntity::class], version = 5, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun transcriptionDao(): TranscriptionDao
 
@@ -23,6 +23,12 @@ abstract class AppDatabase : RoomDatabase() {
         val MIGRATION_3_4 = object : Migration(3, 4) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE transcriptions ADD COLUMN model_used TEXT NOT NULL DEFAULT ''")
+            }
+        }
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // Sanitize obviously invalid durations to keep ETA/stats realistic.
+                db.execSQL("UPDATE transcriptions SET duration_ms = 0 WHERE duration_ms < 0 OR duration_ms > 7200000")
             }
         }
     }
